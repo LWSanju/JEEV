@@ -1,0 +1,2 @@
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run "C:\Mark-XXXIX-OR-main\start_jarvis.bat", 0, False

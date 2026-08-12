@@ -1,0 +1,89 @@
+{
+  "identity": {
+    "name": {
+      "value": "sanjay",
+      "updated": "2026-08-09"
+    },
+    "full_name": {
+      "value": "Sanjay Adhityan",
+      "updated": "2026-08-12 10:42:17"
+    },
+    "role": {
+      "value": "Student, COO & CO FOUNDER OF PACIFIC ALBATROSS",
+      "updated": "2026-08-12 10:42:18"
+    },
+    "language": {
+      "value": "Telugu",
+      "updated": "2026-08-12 15:17:25"
+    }
+  },
+  "preferences": {
+    "default_spotify": {
+      "value": "Use desktop application for Spotify",
+      "updated": "2026-08-08"
+    },
+    "spotify_path": {
+      "value": "C:\\Users\\sanja\\Desktop\\Spotify.lnk",
+      "updated": "2026-08-08"
+    },
+    "name_pronunciation_en": {
+      "value": "Sanjay Adhityan",
+      "updated": "2026-08-11"
+    },
+    "messaging_app": {
+      "value": "WhatsApp",
+      "updated": "2026-08-12 15:17:25"
+    }
+  },
+  "projects": {
+    "mediaplayer_controller_tools": {
+      "value": "User is working on adding tools to a mediaplayer controller",
+      "updated": "2026-08-08"
+    },
+    "current_projects": {
+      "value": "GigsUp (Co-Founder, Prototype Stage), Feynac (AI Research App – In Progress)",
+      "updated": "2026-08-12 10:42:18"
+    }
+  },
+  "relationships": {
+    "Vishal": {
+      "value": "contact",
+      "updated": "2026-08-12 15:17:25"
+    },
+    "creator_relationship": {
+      "value": "Sanjay Adhityan is my brother",
+      "updated": "2026-08-12 18:45:59"
+    }
+  },
+  "wishes": {},
+  "notes": {
+    "last_action": {
+      "value": "Sent WhatsApp message to Vishal",
+      "updated": "2026-08-12 15:17:25"
+    }
+  },
+  "Personal Information": {
+    "CV Ownership": {
+      "value": "The analyzed CV 'sanjay adhityan cv.pdf' belongs to Sanjay Adhityan.",
+      "updated": "2026-08-11"
+    }
+  },
+  "CV Analysis": {
+    "Sanjay Adhityan Profile": {
+      "value": "Student | Co-Founder & COO of Pacific Albatross; B.Com (7.9 CGPA); Skills: Business & Startup Development, AI Tools & Research, Digital Marketing Analytics, Leadership, Python, Tableau; Projects: GigsUp (Co-Founder, prototype), Feynac (AI Research App).",
+      "updated": "2026-08-12 10:09:46"
+    }
+  },
+  "education": {
+    "latest_degree": {
+      "value": "B.Com graduate (79% CGPA, 2023-2026, Bishop Heber College)",
+      "updated": "2026-08-12 10:42:18"
+    }
+  },
+  "skills": {
+    "core_skills": {
+      "value": "Editing & Proofreading, Business & Startup Development, Financial Management, AI Tools & Research, Problem-Solving",
+      "updated": "2026-08-12 10:42:18"
+    }
+  }
+}
