@@ -1,0 +1,61 @@
+{
+  "enabled": true,
+  "poll_seconds": 3,
+  "routines": [
+    {
+      "id": "welcome_on_start",
+      "name": "Proactive startup welcome",
+      "enabled": false,
+      "cooldown_seconds": 3600,
+      "trigger": {"type": "startup"},
+      "action": {
+        "type": "speak",
+        "message": "I'm online. Background monitoring is ready."
+      }
+    },
+    {
+      "id": "long_idle_checkin",
+      "name": "Long idle check-in",
+      "enabled": false,
+      "cooldown_seconds": 1800,
+      "trigger": {"type": "idle_for_seconds", "seconds": 1800},
+      "action": {
+        "type": "speak",
+        "message": "You've been away for a while. I'm still here when you're ready."
+      }
+    },
+    {
+      "id": "spotify_opened",
+      "name": "Spotify opened",
+      "enabled": false,
+      "cooldown_seconds": 900,
+      "trigger": {"type": "app_started", "process": "spotify"},
+      "action": {
+        "type": "speak",
+        "message": "Spotify is up. Music mode, I see."
+      }
+    },
+    {
+      "id": "downloads_changed",
+      "name": "Downloads changed",
+      "enabled": false,
+      "cooldown_seconds": 300,
+      "trigger": {"type": "file_changed", "path": "%USERPROFILE%\\Downloads", "pattern": "*", "include_created": true},
+      "action": {
+        "type": "speak",
+        "message": "Something changed in your Downloads folder."
+      }
+    },
+    {
+      "id": "help_phrase",
+      "name": "Help phrase",
+      "enabled": false,
+      "cooldown_seconds": 120,
+      "trigger": {"type": "user_said", "phrases": ["remind me later", "what should I do next", "I'm stuck"]},
+      "action": {
+        "type": "speak",
+        "message": "I heard you. I can help break the next step down."
+      }
+    }
+  ]
+}

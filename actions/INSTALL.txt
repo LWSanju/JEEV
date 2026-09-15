@@ -1,0 +1,33 @@
+JEEV Robocorp desktop-control replacement
+
+1. Back up your existing source files.
+2. Copy these files into JEEV's source directory:
+   - spotify_control.py       (replace existing)
+   - whatsapp_control.py      (replace existing)
+   - robocorp_desktop.py      (new helper in the same directory)
+
+3. media_control.py is included unchanged for completeness; do not replace it
+   if your current copy has project-specific changes.
+
+4. In the SAME Python 3.12 release virtual environment used by JEEV, install:
+   python -m pip install -r requirements-robocorp.txt
+
+   Or directly:
+   python -m pip install robocorp-windows==1.1.2 pyautogui
+
+5. Test Python imports before rebuilding Nuitka:
+   python -c "import robocorp.windows; import spotify_control; import whatsapp_control; print('JEEV ROBOCORP CONTROLLERS OK')"
+
+Behavior
+- Spotify: Robocorp is used first for native application focus and keyboard input.
+  The requested search result number is still selected by the controller itself;
+  it is NOT merely changed in JEEV's response text.
+- WhatsApp: the search box/result flow remains mouse-first, while Robocorp is used
+  first for native Windows focus and keyboard input. The selected row is physically
+  clicked and then verified by the visible chat-pane change.
+- Existing fallbacks remain available if Robocorp is temporarily unavailable.
+
+Important
+- Do not install RPA.Desktop.Windows for this replacement. Current Robocorp
+  guidance uses robocorp-windows / `from robocorp import windows`; the older
+  RPA.Desktop.Windows library is deprecated/removed from current RPA Framework.

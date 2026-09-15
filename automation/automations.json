@@ -1,0 +1,32 @@
+{
+  "enabled": false,
+  "timezone": "local",
+  "routines": [
+    {
+      "id": "morning_welcome",
+      "name": "Morning welcome",
+      "enabled": false,
+      "schedule": {
+        "type": "daily",
+        "time": "08:00"
+      },
+      "action": {
+        "type": "speak",
+        "message": "Good morning. JEEV is online and ready."
+      }
+    },
+    {
+      "id": "evening_wind_down",
+      "name": "Evening wind down",
+      "enabled": false,
+      "schedule": {
+        "type": "daily",
+        "time": "21:30"
+      },
+      "action": {
+        "type": "speak",
+        "message": "Evening check-in. If you have unfinished tasks, I can help you close them out."
+      }
+    }
+  ]
+}

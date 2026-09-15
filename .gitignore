@@ -6,4 +6,23 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# API credentials / local configuration
 config/api_keys.json
+config/api_config.json
+
+# Local JEEV runtime data
+.jeev/
+.jeev_gmail/
+memory/*.db
+memory/*.json
+
+# Local tests / debug artifacts
+agent_test.py
+project_tree.txt
+test_gemini_live.py
+test_voice_loop.py
+whatsapp_debug.png
+
+# Windows shortcuts
+*.lnk

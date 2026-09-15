@@ -1,0 +1,4 @@
+# JEEV desktop automation dependency
+# Current Robocorp Windows package as of September 2026.
+robocorp-windows==1.1.2
+pyautogui>=0.9.54

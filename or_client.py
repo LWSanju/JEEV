@@ -65,18 +65,15 @@ API_KEY_PATH = (
 # ============================================================
 
 if load_dotenv is not None:
-
     try:
         load_dotenv(
             dotenv_path=ENV_PATH,
             override=False,
         )
-
     except Exception as e:
-
         logger.warning(
-            "[OpenRouter] Could not load .env: "
-            f"{e}"
+            "[OpenRouter] Could not load .env: %s",
+            e,
         )
 
 
@@ -94,9 +91,11 @@ MODELS_URL = (
 
 
 # ============================================================
-# FREE ROUTING
+# FREE-ONLY ROUTING
 # ============================================================
-
+# JEEV must NEVER send an inference request to a paid/non-free model.
+# Coding, normal chat, JSON, vision, and multi-turn requests all use
+# OpenRouter's free router and dynamically discovered zero-price models.
 FREE_ROUTER_MODEL = "openrouter/free"
 
 
@@ -105,52 +104,48 @@ FREE_ROUTER_MODEL = "openrouter/free"
 # ============================================================
 
 DEFAULT_MAX_TOKENS = 4096
-
 DEFAULT_TEMPERATURE = 0.7
 
 MEMORY_MAX_TOKENS = 1200
 
-REQUEST_TIMEOUT = 60
+# IMPORTANT:
+#
+# The old value was 60 seconds.
+# If the listener shares a thread with an AI call, that can
+# make JEEV appear frozen for a long time.
+#
+# Keep network operations bounded.
+REQUEST_TIMEOUT = 20
 
 
 # ============================================================
 # STAGE CONFIGURATION
 # ============================================================
 
-# Stage 1:
-# OpenRouter's free router.
-#
-# Stage 2:
-# First discovered free model.
-#
-# Stage 3:
-# Second/third discovered free models.
-#
-# We intentionally do not fire many requests at once.
-
-MAX_STAGE_MODELS = 3
+MAX_STAGE_MODELS = 6
 
 
 # ============================================================
 # RETRY CONFIGURATION
 # ============================================================
 
-# One request per model.
-#
-# This is important for free endpoints.
 MAX_RETRIES_PER_MODEL = 1
 
 
-# Default model cooldown.
+# ============================================================
+# COOLDOWNS
+# ============================================================
+
 DEFAULT_RATE_LIMIT_COOLDOWN = 300
 
-
-# Maximum accepted Retry-After.
 MAX_RATE_LIMIT_COOLDOWN = 3600
 
-
-# Temporarily failed model cooldown.
 FAILED_MODEL_COOLDOWN = 600
+
+# Short provider-failure circuit breaker. Once the entire fallback chain has
+# failed, do not immediately hammer OpenRouter again from another JEEV task.
+# This is intentionally much shorter than the 429/account cooldown.
+PROVIDER_FAILURE_COOLDOWN = 30
 
 
 # ============================================================
@@ -160,21 +155,17 @@ FAILED_MODEL_COOLDOWN = 600
 DYNAMIC_MODELS_CACHE_TTL = 300
 
 MAX_DYNAMIC_FREE_MODELS = 20
+MAX_DYNAMIC_PAID_MODELS = 12
 
 
 # ============================================================
 # GLOBAL STATE
 # ============================================================
 
-# Model-specific rate limits.
 _rate_limited: dict[str, float] = {}
 
-
-# Model-specific failures.
 _failed_models: dict[str, float] = {}
 
-
-# Free model cache.
 _dynamic_models_cache: list[str] = []
 
 _dynamic_vision_models_cache: list[str] = []
@@ -183,19 +174,17 @@ _dynamic_models_cache_time: float = 0.0
 
 _dynamic_vision_models_cache_time: float = 0.0
 
+_dynamic_paid_models_cache: list[str] = []
+_dynamic_paid_models_cache_time: float = 0.0
+
 
 # ============================================================
 # ACCOUNT/GLOBAL RATE LIMIT
 # ============================================================
 
-# IMPORTANT:
-#
-# This is only activated when OpenRouter's response indicates
-# that the ACCOUNT itself is rate-limited.
-#
-# A model/provider-specific 429 does NOT activate this.
-#
 _global_account_rate_limit_until: float = 0.0
+
+_provider_failure_until: float = 0.0
 
 
 # ============================================================
@@ -222,31 +211,24 @@ def _load_api_key() -> str:
     ).strip()
 
     if env_key:
-
         logger.info(
             "[OpenRouter] API key loaded from "
             "environment/.env"
         )
-
         return env_key
-
 
     # --------------------------------------------------------
     # 2. config/api_keys.json
     # --------------------------------------------------------
 
     if API_KEY_PATH.exists():
-
         try:
-
             with open(
                 API_KEY_PATH,
                 "r",
                 encoding="utf-8",
             ) as f:
-
                 data = json.load(f)
-
 
             key = str(
                 data.get(
@@ -255,32 +237,26 @@ def _load_api_key() -> str:
                 )
             ).strip()
 
-
             if key:
-
                 logger.info(
                     "[OpenRouter] API key loaded from "
                     "config/api_keys.json"
                 )
-
                 return key
 
-
         except json.JSONDecodeError as e:
-
             logger.warning(
                 "[OpenRouter] api_keys.json contains "
-                f"invalid JSON: {e}"
+                "invalid JSON: %s",
+                e,
             )
-
 
         except Exception as e:
-
             logger.warning(
                 "[OpenRouter] Could not read "
-                f"api_keys.json: {e}"
+                "api_keys.json: %s",
+                e,
             )
-
 
     # --------------------------------------------------------
     # Nothing found
@@ -308,21 +284,16 @@ class OpenRouterClient:
             "Authorization": (
                 f"Bearer {self.api_key}"
             ),
-
             "Content-Type": "application/json",
-
             "HTTP-Referer": (
                 "https://github.com/mark-xxv"
             ),
-
             "X-Title": "JEEV",
         }
-
 
         logger.info(
             "[OpenRouter] Client initialized successfully"
         )
-
 
     # ========================================================
     # ACCOUNT RATE LIMIT
@@ -334,7 +305,6 @@ class OpenRouterClient:
             time.time()
             < _global_account_rate_limit_until
         )
-
 
     def _account_rate_limit_remaining(self) -> int:
 
@@ -351,7 +321,6 @@ class OpenRouterClient:
             int(remaining),
         )
 
-
     def _mark_account_rate_limited(
         self,
         cooldown: int,
@@ -367,29 +336,25 @@ class OpenRouterClient:
             ),
         )
 
-
         new_until = (
             time.time()
             + cooldown
         )
 
-
         if (
             new_until
             > _global_account_rate_limit_until
         ):
-
             _global_account_rate_limit_until = (
                 new_until
             )
 
-
         logger.warning(
             "[OpenRouter] ACCOUNT/GLOBAL "
-            f"rate limit detected — "
-            f"cooldown {cooldown}s"
+            "rate limit detected — "
+            "cooldown %ss",
+            cooldown,
         )
-
 
     # ========================================================
     # MODEL RATE LIMIT
@@ -400,27 +365,20 @@ class OpenRouterClient:
         model: str,
     ) -> bool:
 
-        timestamp = _rate_limited.get(
-            model
-        )
+        timestamp = _rate_limited.get(model)
 
         if timestamp is None:
             return False
-
 
         if (
             time.time()
             - timestamp
             >= DEFAULT_RATE_LIMIT_COOLDOWN
         ):
-
             del _rate_limited[model]
-
             return False
 
-
         return True
-
 
     def _mark_rate_limited(
         self,
@@ -431,16 +389,14 @@ class OpenRouterClient:
         if cooldown is None:
             cooldown = DEFAULT_RATE_LIMIT_COOLDOWN
 
-
         _rate_limited[model] = time.time()
-
 
         logger.warning(
             "[OpenRouter] Model rate limited: "
-            f"{model} — cooling down for "
-            f"{cooldown}s"
+            "%s — cooling down for %ss",
+            model,
+            cooldown,
         )
-
 
     # ========================================================
     # FAILED MODEL
@@ -451,27 +407,20 @@ class OpenRouterClient:
         model: str,
     ) -> bool:
 
-        timestamp = _failed_models.get(
-            model
-        )
+        timestamp = _failed_models.get(model)
 
         if timestamp is None:
             return False
-
 
         if (
             time.time()
             - timestamp
             >= FAILED_MODEL_COOLDOWN
         ):
-
             del _failed_models[model]
-
             return False
 
-
         return True
-
 
     def _mark_failed_model(
         self,
@@ -480,13 +429,12 @@ class OpenRouterClient:
 
         _failed_models[model] = time.time()
 
-
         logger.warning(
             "[OpenRouter] Temporarily disabling "
-            f"{model} for "
-            f"{FAILED_MODEL_COOLDOWN}s"
+            "%s for %ss",
+            model,
+            FAILED_MODEL_COOLDOWN,
         )
-
 
     # ========================================================
     # RETRY-AFTER
@@ -501,14 +449,9 @@ class OpenRouterClient:
             "Retry-After"
         )
 
-
         if value:
-
             try:
-
-                seconds = int(
-                    float(value)
-                )
+                seconds = int(float(value))
 
                 return max(
                     1,
@@ -521,9 +464,7 @@ class OpenRouterClient:
             except (ValueError, TypeError):
                 pass
 
-
         return DEFAULT_RATE_LIMIT_COOLDOWN
-
 
     # ========================================================
     # DETECT ACCOUNT/GLOBAL 429
@@ -533,11 +474,6 @@ class OpenRouterClient:
     def _is_account_rate_limit_response(
         response: requests.Response,
     ) -> bool:
-        """
-        Determine whether a 429 appears to be an
-        account/global rate limit rather than merely
-        a particular model/provider being unavailable.
-        """
 
         body = ""
 
@@ -545,11 +481,6 @@ class OpenRouterClient:
             body = response.text[:5000].lower()
         except Exception:
             pass
-
-
-        # ----------------------------------------------------
-        # Strong account/global indicators.
-        # ----------------------------------------------------
 
         account_terms = (
             "account",
@@ -564,11 +495,6 @@ class OpenRouterClient:
             "too many requests",
         )
 
-
-        # ----------------------------------------------------
-        # Provider/model-specific indicators.
-        # ----------------------------------------------------
-
         provider_terms = (
             "provider",
             "model",
@@ -578,48 +504,26 @@ class OpenRouterClient:
             "overloaded",
         )
 
-
         has_account_term = any(
             term in body
             for term in account_terms
         )
-
 
         has_provider_term = any(
             term in body
             for term in provider_terms
         )
 
-
-        # ----------------------------------------------------
-        # If OpenRouter explicitly talks about a model/
-        # provider, let the fallback stages continue.
-        # ----------------------------------------------------
-
-        if has_provider_term and not has_account_term:
-
+        if (
+            has_provider_term
+            and not has_account_term
+        ):
             return False
 
-
-        # ----------------------------------------------------
-        # Explicit account-level response.
-        # ----------------------------------------------------
-
         if has_account_term:
-
             return True
 
-
-        # ----------------------------------------------------
-        # Unknown 429:
-        #
-        # Treat as model-level first.
-        #
-        # This allows Stage 2 / Stage 3 to work.
-        # ----------------------------------------------------
-
         return False
-
 
     # ========================================================
     # DYNAMIC FREE MODEL DISCOVERY
@@ -635,9 +539,7 @@ class OpenRouterClient:
         global _dynamic_models_cache_time
         global _dynamic_vision_models_cache_time
 
-
         now = time.time()
-
 
         # ----------------------------------------------------
         # CACHE
@@ -647,35 +549,29 @@ class OpenRouterClient:
 
             if (
                 _dynamic_vision_models_cache
-                and
-                (
+                and (
                     now
                     - _dynamic_vision_models_cache_time
                     < DYNAMIC_MODELS_CACHE_TTL
                 )
             ):
-
                 return list(
                     _dynamic_vision_models_cache
                 )
-
 
         else:
 
             if (
                 _dynamic_models_cache
-                and
-                (
+                and (
                     now
                     - _dynamic_models_cache_time
                     < DYNAMIC_MODELS_CACHE_TTL
                 )
             ):
-
                 return list(
                     _dynamic_models_cache
                 )
-
 
         # ----------------------------------------------------
         # MODEL LIST REQUEST
@@ -689,32 +585,27 @@ class OpenRouterClient:
                     "Authorization":
                         f"Bearer {self.api_key}",
                 },
-                timeout=20,
+                timeout=10,
             )
-
 
             if response.status_code != 200:
 
                 logger.warning(
                     "[OpenRouter] Model discovery "
-                    f"failed: HTTP "
-                    f"{response.status_code}"
+                    "failed: HTTP %s",
+                    response.status_code,
                 )
 
                 return []
 
-
             data = response.json()
-
 
             models = data.get(
                 "data",
                 [],
             )
 
-
             free_models: list[str] = []
-
 
             # ------------------------------------------------
             # FIND FREE MODELS
@@ -726,24 +617,18 @@ class OpenRouterClient:
                     "id"
                 )
 
-
                 if not model_id:
                     continue
 
-
-                # ------------------------------------------------
-                # Never include the router here.
-                # ------------------------------------------------
+                # Never include router itself.
 
                 if model_id == FREE_ROUTER_MODEL:
                     continue
-
 
                 pricing = model_data.get(
                     "pricing",
                     {},
                 )
-
 
                 prompt_price = str(
                     pricing.get(
@@ -752,14 +637,12 @@ class OpenRouterClient:
                     )
                 ).strip()
 
-
                 completion_price = str(
                     pricing.get(
                         "completion",
                         "",
                     )
                 ).strip()
-
 
                 is_free = (
                     prompt_price
@@ -779,13 +662,11 @@ class OpenRouterClient:
                     }
                 )
 
-
                 if not is_free:
                     continue
 
-
                 # ------------------------------------------------
-                # Vision filtering.
+                # Vision filtering
                 # ------------------------------------------------
 
                 if vision:
@@ -797,7 +678,6 @@ class OpenRouterClient:
                         )
                     )
 
-
                     input_modalities = (
                         architecture.get(
                             "input_modalities",
@@ -805,22 +685,18 @@ class OpenRouterClient:
                         )
                     )
 
-
                     if (
                         "image"
                         not in input_modalities
                     ):
-
                         continue
-
 
                 free_models.append(
                     model_id
                 )
 
-
             # ------------------------------------------------
-            # Remove duplicates.
+            # Remove duplicates
             # ------------------------------------------------
 
             unique_models = []
@@ -838,11 +714,9 @@ class OpenRouterClient:
                     model
                 )
 
-
             free_models = unique_models[
                 :MAX_DYNAMIC_FREE_MODELS
             ]
-
 
             # ------------------------------------------------
             # CACHE
@@ -868,16 +742,13 @@ class OpenRouterClient:
                     now
                 )
 
-
             logger.info(
-                "[OpenRouter] Discovered "
-                f"{len(free_models)} free "
-                "model(s)"
+                "[OpenRouter] Discovered %s free "
+                "model(s)",
+                len(free_models),
             )
 
-
             return free_models
-
 
         except requests.exceptions.Timeout:
 
@@ -886,25 +757,65 @@ class OpenRouterClient:
                 "timed out"
             )
 
-
         except requests.exceptions.RequestException as e:
 
             logger.warning(
                 "[OpenRouter] Model discovery "
-                f"error: {e}"
+                "error: %s",
+                e,
             )
-
 
         except Exception as e:
 
             logger.warning(
                 "[OpenRouter] Unexpected model "
-                f"discovery error: {e}"
+                "discovery error: %s",
+                e,
             )
-
 
         return []
 
+    # ========================================================
+    # CODING MODEL DISCOVERY
+    # ========================================================
+
+    @staticmethod
+    def _is_coding_request(messages: list[dict]) -> bool:
+        """Detect JEEV Coding Agent conversations without changing callers."""
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    str(item.get("text", ""))
+                    for item in content
+                    if isinstance(item, dict)
+                )
+            text = str(content).lower()
+            if "jeev coding agent" in text:
+                return True
+        return False
+
+    @staticmethod
+    def _model_is_free(model_data: dict) -> bool:
+        pricing = model_data.get("pricing", {}) or {}
+        prompt = str(pricing.get("prompt", "")).strip()
+        completion = str(pricing.get("completion", "")).strip()
+        zero = {"0", "0.0", "0.00", "0.000000", "0.0000000"}
+        return prompt in zero and completion in zero
+
+    def _discover_paid_models(self, vision: bool = False) -> list[str]:
+        """
+        Compatibility stub.
+
+        JEEV is configured FREE-ONLY. Paid model discovery is intentionally
+        disabled so this method can never contribute a paid inference target.
+        """
+        logger.info(
+            "[OpenRouter] Paid model discovery disabled by FREE-ONLY policy."
+        )
+        return []
 
     # ========================================================
     # RAW API CALL
@@ -929,16 +840,14 @@ class OpenRouterClient:
                 self._account_rate_limit_remaining()
             )
 
-
             logger.warning(
                 "[OpenRouter] Request blocked by "
                 "account rate-limit cooldown. "
-                f"~{remaining}s remaining."
+                "~%ss remaining.",
+                remaining,
             )
 
-
             return None
-
 
         # ----------------------------------------------------
         # PAYLOAD
@@ -951,16 +860,13 @@ class OpenRouterClient:
             "temperature": temperature,
         }
 
-
         if response_format:
-
             payload["response_format"] = (
                 response_format
             )
 
-
         # ----------------------------------------------------
-        # ONE REQUEST PER MODEL
+        # REQUEST
         # ----------------------------------------------------
 
         for attempt in range(
@@ -977,9 +883,7 @@ class OpenRouterClient:
                     timeout=REQUEST_TIMEOUT,
                 )
 
-
                 status = response.status_code
-
 
                 # =================================================
                 # SUCCESS
@@ -988,46 +892,42 @@ class OpenRouterClient:
                 if status == 200:
 
                     try:
-
                         data = response.json()
 
                     except Exception as e:
 
                         logger.warning(
-                            "[OpenRouter] "
-                            f"{model} returned invalid "
-                            f"JSON: {e}"
+                            "[OpenRouter] %s returned "
+                            "invalid JSON: %s",
+                            model,
+                            e,
                         )
 
                         return None
-
 
                     choices = data.get(
                         "choices"
                     )
 
-
                     if not choices:
 
                         logger.warning(
-                            "[OpenRouter] "
-                            f"{model} returned no choices"
+                            "[OpenRouter] %s returned "
+                            "no choices",
+                            model,
                         )
 
                         return None
-
 
                     message = choices[0].get(
                         "message",
                         {},
                     )
 
-
                     content = message.get(
                         "content",
                         "",
                     )
-
 
                     # ------------------------------------------------
                     # Provider may return list content.
@@ -1040,7 +940,6 @@ class OpenRouterClient:
 
                         text_parts = []
 
-
                         for item in content:
 
                             if isinstance(
@@ -1052,13 +951,10 @@ class OpenRouterClient:
                                     "text"
                                 )
 
-
                                 if text:
-
                                     text_parts.append(
                                         str(text)
                                     )
-
 
                             elif isinstance(
                                 item,
@@ -1069,27 +965,26 @@ class OpenRouterClient:
                                     item
                                 )
 
-
                         content = "\n".join(
                             text_parts
                         )
 
-
                     if content is None:
                         return None
-
 
                     content = str(
                         content
                     ).strip()
 
-
                     if not content:
+                        logger.warning(
+                            "[OpenRouter] %s returned "
+                            "empty content",
+                            model,
+                        )
                         return None
 
-
                     return content
-
 
                 # =================================================
                 # AUTHENTICATION
@@ -1107,30 +1002,34 @@ class OpenRouterClient:
                     except Exception:
                         pass
 
-
                     logger.error(
-                        "[OpenRouter] "
-                        f"{model} → HTTP "
-                        f"{status} "
-                        "(authentication/permission "
-                        "error)"
+                        "[OpenRouter] %s → HTTP %s "
+                        "(authentication/permission error)",
+                        model,
+                        status,
                     )
 
-
                     if body:
-
                         logger.error(
                             "[OpenRouter] Server "
-                            f"response: {body}"
+                            "response: %s",
+                            body,
                         )
 
+                    # IMPORTANT:
+                    #
+                    # Authentication is not a provider/model
+                    # failure. Marking it as failed would hide
+                    # the actual configuration problem.
+                    #
+                    # Raise here so the higher-level safe wrapper
+                    # can log it properly.
 
                     raise RuntimeError(
                         "OpenRouter authentication "
                         f"failed (HTTP {status}). "
                         "Check OPENROUTER_API_KEY."
                     )
-
 
                 # =================================================
                 # RATE LIMIT
@@ -1144,48 +1043,58 @@ class OpenRouterClient:
                         )
                     )
 
-
                     is_account_limit = (
                         self._is_account_rate_limit_response(
                             response
                         )
                     )
 
+                    body_lower = ""
+                    try:
+                        body_lower = response.text[:5000].lower()
+                    except Exception:
+                        pass
 
-                    if is_account_limit:
+                    # A free-model daily quota is NOT an account-wide paid-model
+                    # outage.  Do not poison the global cooldown; immediately let
+                    # the coding fallback move to a paid model.
+                    free_quota_limit = (
+                        "free-models-per-day" in body_lower
+                        or "free models per day" in body_lower
+                        or "free-model limit" in body_lower
+                        or "free limit" in body_lower
+                    )
 
-                        self._mark_account_rate_limited(
-                            cooldown
-                        )
+                    if is_account_limit and not free_quota_limit:
 
+                        self._mark_account_rate_limited(cooldown)
 
                         logger.error(
-                            "[OpenRouter] "
-                            f"{model} → HTTP 429 "
-                            "ACCOUNT/GLOBAL RATE LIMIT"
+                            "[OpenRouter] %s → HTTP 429 ACCOUNT/GLOBAL RATE LIMIT",
+                            model,
                         )
-
 
                     else:
 
-                        self._mark_rate_limited(
-                            model,
-                            cooldown,
-                        )
+                        self._mark_rate_limited(model, cooldown)
 
+                        if free_quota_limit:
+                            logger.warning(
+                                "[OpenRouter] %s → HTTP 429 FREE-MODEL DAILY QUOTA; "
+                                "paid inference is disabled.",
+                                model,
+                            )
 
                         logger.warning(
-                            "[OpenRouter] "
-                            f"{model} → HTTP 429 "
-                            "MODEL/PROVIDER RATE LIMIT"
+                            "[OpenRouter] %s → HTTP 429 "
+                            "MODEL/PROVIDER RATE LIMIT",
+                            model,
                         )
-
 
                     return None
 
-
                 # =================================================
-                # MODEL UNAVAILABLE
+                # MODEL / REQUEST UNAVAILABLE
                 # =================================================
 
                 if status in {
@@ -1200,37 +1109,28 @@ class OpenRouterClient:
                     body = ""
 
                     try:
-
                         body = response.text[:1000]
-
                     except Exception:
                         pass
 
-
                     logger.warning(
-                        "[OpenRouter] "
-                        f"{model} → HTTP "
-                        f"{status} "
-                        "(model/request "
-                        "unavailable)"
+                        "[OpenRouter] %s → HTTP %s "
+                        "(model/request unavailable)",
+                        model,
+                        status,
                     )
 
-
                     if body:
-
                         logger.debug(
-                            "[OpenRouter] "
-                            f"Response: {body}"
+                            "[OpenRouter] Response: %s",
+                            body,
                         )
-
 
                     self._mark_failed_model(
                         model
                     )
 
-
                     return None
-
 
                 # =================================================
                 # SERVER ERROR
@@ -1239,69 +1139,64 @@ class OpenRouterClient:
                 if 500 <= status <= 599:
 
                     logger.warning(
-                        "[OpenRouter] "
-                        f"{model} → HTTP "
-                        f"{status} "
-                        "(server error, "
-                        f"attempt "
-                        f"{attempt}/"
-                        f"{MAX_RETRIES_PER_MODEL})"
+                        "[OpenRouter] %s → HTTP %s "
+                        "(server error, attempt %s/%s)",
+                        model,
+                        status,
+                        attempt,
+                        MAX_RETRIES_PER_MODEL,
                     )
 
                 else:
 
                     logger.warning(
-                        "[OpenRouter] "
-                        f"{model} → HTTP "
-                        f"{status} "
-                        f"(attempt "
-                        f"{attempt}/"
-                        f"{MAX_RETRIES_PER_MODEL})"
+                        "[OpenRouter] %s → HTTP %s "
+                        "(attempt %s/%s)",
+                        model,
+                        status,
+                        attempt,
+                        MAX_RETRIES_PER_MODEL,
                     )
-
 
             except requests.exceptions.Timeout:
 
                 logger.warning(
-                    "[OpenRouter] "
-                    f"{model} → Timeout "
-                    f"(attempt "
-                    f"{attempt}/"
-                    f"{MAX_RETRIES_PER_MODEL})"
+                    "[OpenRouter] %s → Timeout "
+                    "(attempt %s/%s)",
+                    model,
+                    attempt,
+                    MAX_RETRIES_PER_MODEL,
                 )
-
 
             except requests.exceptions.ConnectionError as e:
 
                 logger.warning(
-                    "[OpenRouter] "
-                    f"{model} → Connection "
-                    f"error: {e}"
+                    "[OpenRouter] %s → Connection "
+                    "error: %s",
+                    model,
+                    e,
                 )
-
 
             except requests.exceptions.RequestException as e:
 
                 logger.warning(
-                    "[OpenRouter] "
-                    f"{model} → Request "
-                    f"error: {e}"
+                    "[OpenRouter] %s → Request "
+                    "error: %s",
+                    model,
+                    e,
                 )
 
-
             except RuntimeError:
-
                 raise
-
 
             except Exception as e:
 
                 logger.error(
-                    "[OpenRouter] "
-                    f"{model} → Unexpected "
-                    f"error: {e}"
+                    "[OpenRouter] %s → Unexpected "
+                    "error: %s",
+                    model,
+                    e,
                 )
-
 
             # ----------------------------------------------------
             # Retry only non-429 request failures.
@@ -1312,15 +1207,25 @@ class OpenRouterClient:
                 < MAX_RETRIES_PER_MODEL
             ):
 
-                time.sleep(2)
-
+                time.sleep(1)
 
         return None
-
 
     # ========================================================
     # THREE-STAGE ROUTER
     # ========================================================
+
+    def _provider_failure_active(self) -> bool:
+        return time.time() < _provider_failure_until
+
+    @staticmethod
+    def _mark_provider_failure() -> None:
+        global _provider_failure_until
+        _provider_failure_until = max(
+            _provider_failure_until,
+            time.time() + PROVIDER_FAILURE_COOLDOWN,
+        )
+
 
     def _call_with_fallback(
         self,
@@ -1332,236 +1237,35 @@ class OpenRouterClient:
         response_format: Optional[dict] = None,
         vision: bool = False,
     ) -> str:
+        """
+        Execute inference through the configured fallback chain.
 
-        # ----------------------------------------------------
-        # ACCOUNT LIMIT
-        # ----------------------------------------------------
+        IMPORTANT SAFETY CONTRACT:
 
-        if self._account_rate_limit_active():
+        This method NEVER allows ordinary provider/model
+        unavailability to escape into JEEV's main runtime.
 
-            remaining = (
-                self._account_rate_limit_remaining()
-            )
+        On complete provider failure it returns "".
 
+        Only explicit configuration/authentication errors are
+        retained internally and converted to a safe empty result
+        at the public API boundary.
+        """
 
-            raise RuntimeError(
-                "[OpenRouter] OpenRouter account "
-                "is rate-limited. "
-                f"Retry in approximately "
-                f"{remaining}s."
-            )
-
-
-        # ====================================================
-        # BUILD MODEL LIST
-        # ====================================================
-
-        candidates: list[str] = []
-
-
-        # ----------------------------------------------------
-        # Explicit requested model.
-        # ----------------------------------------------------
-
-        if model:
-
-            if model == FREE_ROUTER_MODEL:
-
-                candidates.append(
-                    FREE_ROUTER_MODEL
-                )
-
-            else:
-
-                discovered = (
-                    self._discover_free_models(
-                        vision=vision
-                    )
-                )
-
-
-                if model not in discovered:
-
-                    raise RuntimeError(
-                        "[OpenRouter] Requested model "
-                        f"'{model}' is not confirmed "
-                        "as a free model."
-                    )
-
-
-                candidates.append(
-                    model
-                )
-
-
-        else:
-
-            # =================================================
-            # STAGE 1
-            # =================================================
-
-            candidates.append(
-                FREE_ROUTER_MODEL
-            )
-
-
-            # =================================================
-            # STAGE 2 + STAGE 3
-            # =================================================
-
-            discovered = (
-                self._discover_free_models(
-                    vision=vision
-                )
-            )
-
-
-            for discovered_model in discovered:
-
-                if discovered_model in candidates:
-                    continue
-
-
-                candidates.append(
-                    discovered_model
-                )
-
-
-                if len(candidates) >= MAX_STAGE_MODELS:
-                    break
-
-
-        # ----------------------------------------------------
-        # Remove duplicates.
-        # ----------------------------------------------------
-
-        unique_candidates = []
-
-        seen = set()
-
-
-        for candidate in candidates:
-
-            if candidate in seen:
-                continue
-
-            seen.add(candidate)
-
-            unique_candidates.append(
-                candidate
-            )
-
-
-        candidates = unique_candidates
-
-
-        # ====================================================
-        # EXECUTE STAGES
-        # ====================================================
-
-        last_error = None
-
-
-        for index, target_model in enumerate(
-            candidates,
-            start=1,
-        ):
+        try:
 
             # ------------------------------------------------
-            # ACCOUNT LIMIT CHECK
-            # ------------------------------------------------
-
-            if self._account_rate_limit_active():
-
-                remaining = (
-                    self._account_rate_limit_remaining()
-                )
-
-
-                raise RuntimeError(
-                    "[OpenRouter] OpenRouter account "
-                    "is rate-limited. "
-                    f"Retry in approximately "
-                    f"{remaining}s."
-                )
-
-
-            # ------------------------------------------------
-            # MODEL COOLDOWN
-            # ------------------------------------------------
-
-            if self._is_rate_limited(
-                target_model
-            ):
-
+            # PROVIDER FAILURE CIRCUIT BREAKER
+            # ----------------------------------------------------
+            # OpenRouter is optional. A recently failed fallback chain should
+            # fail fast instead of making JEEV look frozen.
+            if self._provider_failure_active():
+                remaining = max(1, int(_provider_failure_until - time.time()))
                 logger.warning(
-                    "[OpenRouter] Stage "
-                    f"{index}/{len(candidates)} "
-                    f"→ Skipping rate-limited model: "
-                    f"{target_model}"
+                    "[OpenRouter] Provider circuit open; skipping inference for ~%ss.",
+                    remaining,
                 )
-
-                continue
-
-
-            # ------------------------------------------------
-            # FAILED MODEL
-            # ------------------------------------------------
-
-            if self._is_failed_model(
-                target_model
-            ):
-
-                logger.warning(
-                    "[OpenRouter] Stage "
-                    f"{index}/{len(candidates)} "
-                    f"→ Skipping failed model: "
-                    f"{target_model}"
-                )
-
-                continue
-
-
-            # ------------------------------------------------
-            # STAGE LOG
-            # ------------------------------------------------
-
-            logger.info(
-                "[OpenRouter] Stage "
-                f"{index}/{len(candidates)} "
-                f"→ Trying: "
-                f"{target_model}"
-            )
-
-
-            # ------------------------------------------------
-            # CALL
-            # ------------------------------------------------
-
-            result = self._call(
-                target_model,
-                messages,
-                max_tokens,
-                temperature,
-                response_format,
-            )
-
-
-            # ------------------------------------------------
-            # SUCCESS
-            # ------------------------------------------------
-
-            if result:
-
-                logger.info(
-                    "[OpenRouter] ✓ Stage "
-                    f"{index} SUCCESS: "
-                    f"{target_model}"
-                )
-
-
-                return result
-
+                return ""
 
             # ------------------------------------------------
             # ACCOUNT LIMIT
@@ -1569,72 +1273,371 @@ class OpenRouterClient:
 
             if self._account_rate_limit_active():
 
-                remaining = (
-                    self._account_rate_limit_remaining()
-                )
-
-
-                raise RuntimeError(
-                    "[OpenRouter] OpenRouter account "
-                    "rate limit reached. "
-                    f"Retry in approximately "
-                    f"{remaining}s."
-                )
-
-
-            # ------------------------------------------------
-            # MODEL FAILURE
-            # ------------------------------------------------
-
-            if self._is_rate_limited(
-                target_model
-            ):
+                remaining = self._account_rate_limit_remaining()
 
                 logger.warning(
-                    "[OpenRouter] Stage "
-                    f"{index} failed due to model "
-                    "rate limit."
+                    "[OpenRouter] Account rate-limited. Inference skipped. "
+                    "Retry in approximately %ss.",
+                    remaining,
                 )
 
-                last_error = (
-                    f"{target_model} rate limited"
+                return ""
+
+            # ====================================================
+            # BUILD MODEL LIST — FREE ONLY
+            # ====================================================
+            #
+            # IMPORTANT:
+            # No inference request is ever allowed to use a paid model.
+            # This applies equally to normal chat, coding, JSON, vision,
+            # and multi-turn requests.
+            #
+            # If a caller supplies a model explicitly, we validate it
+            # against OpenRouter's zero-price model list. If it is not
+            # known to be free, it is ignored and the free pool is used.
+            candidates: list[str] = []
+
+            discovered = self._discover_free_models(vision=vision)
+
+            # The OpenRouter free router is always the first choice.
+            candidates.append(FREE_ROUTER_MODEL)
+
+            # Add dynamically discovered zero-price models.
+            for discovered_model in discovered:
+                if discovered_model not in candidates:
+                    candidates.append(discovered_model)
+                if len(candidates) >= MAX_STAGE_MODELS:
+                    break
+
+            # An explicitly requested model is allowed ONLY if it is
+            # confirmed free by discovery. Never trust a caller-provided
+            # model name by itself.
+            if model:
+                requested_model = str(model).strip()
+                if requested_model == FREE_ROUTER_MODEL:
+                    pass
+                elif requested_model in discovered:
+                    # Put a confirmed-free explicit model first.
+                    candidates = [
+                        requested_model,
+                        *[m for m in candidates if m != requested_model],
+                    ][:MAX_STAGE_MODELS]
+                    logger.info(
+                        "[OpenRouter] Explicit model accepted as FREE: %s",
+                        requested_model,
+                    )
+                else:
+                    logger.warning(
+                        "[OpenRouter] Ignoring requested model '%s' because "
+                        "it is not confirmed FREE. FREE-ONLY policy enforced.",
+                        requested_model,
+                    )
+
+            if self._is_coding_request(messages):
+                logger.info(
+                    "[OpenRouter] Coding route: FREE models only. "
+                    "Paid/non-free inference is disabled."
                 )
 
-                continue
+            # ------------------------------------------------
+            # Remove duplicates
+            # ------------------------------------------------
 
+            unique_candidates = []
 
-            if self._is_failed_model(
-                target_model
-            ):
+            seen = set()
+
+            for candidate in candidates:
+
+                if candidate in seen:
+                    continue
+
+                seen.add(candidate)
+
+                unique_candidates.append(
+                    candidate
+                )
+
+            candidates = unique_candidates
+
+            if not candidates:
 
                 logger.warning(
-                    "[OpenRouter] Stage "
-                    f"{index} model unavailable."
+                    "[OpenRouter] No usable free "
+                    "inference candidates found."
                 )
+
+                return ""
+
+            # ====================================================
+            # EXECUTE STAGES — FREE ONLY
+            # ====================================================
+
+            # Final defense: every candidate must be the free router or a
+            # model discovered from OpenRouter with zero prompt/completion
+            # pricing. This prevents future routing changes from
+            # accidentally sending a paid inference request.
+            free_set = set(discovered)
+            free_set.add(FREE_ROUTER_MODEL)
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate in free_set
+            ]
+
+            if not candidates:
+                logger.warning(
+                    "[OpenRouter] No confirmed FREE inference candidates found."
+                )
+                return ""
+
+            last_error = None
+
+            for index, target_model in enumerate(
+                candidates,
+                start=1,
+            ):
+
+                # ------------------------------------------------
+                # ACCOUNT LIMIT CHECK
+                # ------------------------------------------------
+
+                if self._account_rate_limit_active():
+
+                    remaining = (
+                        self._account_rate_limit_remaining()
+                    )
+
+                    logger.warning(
+                        "[OpenRouter] Free-only account/global rate limit "
+                        "activated during fallback. Stopping inference. "
+                        "Retry in approximately %ss.",
+                        remaining,
+                    )
+
+                    return ""
+
+                # ------------------------------------------------
+                # MODEL COOLDOWN
+                # ------------------------------------------------
+
+                if self._is_rate_limited(
+                    target_model
+                ):
+
+                    logger.warning(
+                        "[OpenRouter] Stage %s/%s "
+                        "→ Skipping rate-limited model: %s",
+                        index,
+                        len(candidates),
+                        target_model,
+                    )
+
+                    last_error = (
+                        f"{target_model} rate limited"
+                    )
+
+                    continue
+
+                # ------------------------------------------------
+                # FAILED MODEL
+                # ------------------------------------------------
+
+                if self._is_failed_model(
+                    target_model
+                ):
+
+                    logger.warning(
+                        "[OpenRouter] Stage %s/%s "
+                        "→ Skipping failed model: %s",
+                        index,
+                        len(candidates),
+                        target_model,
+                    )
+
+                    last_error = (
+                        f"{target_model} unavailable"
+                    )
+
+                    continue
+
+                # ------------------------------------------------
+                # STAGE LOG
+                # ------------------------------------------------
+
+                logger.info(
+                    "[OpenRouter] Stage %s/%s → Trying: %s",
+                    index,
+                    len(candidates),
+                    target_model,
+                )
+
+                # ------------------------------------------------
+                # CALL
+                # ------------------------------------------------
+
+                try:
+
+                    result = self._call(
+                        target_model,
+                        messages,
+                        max_tokens,
+                        temperature,
+                        response_format,
+                    )
+
+                except RuntimeError as e:
+
+                    # Authentication/configuration failure.
+                    #
+                    # Do NOT allow this to kill the caller.
+
+                    logger.error(
+                        "[OpenRouter] Stage %s "
+                        "configuration/authentication failure: %s",
+                        index,
+                        e,
+                    )
+
+                    last_error = str(e)
+
+                    # No point hammering other models when the
+                    # same API key is invalid.
+
+                    break
+
+                except Exception as e:
+
+                    # Absolute final safety barrier.
+                    #
+                    # A provider bug must NEVER terminate JEEV.
+
+                    logger.exception(
+                        "[OpenRouter] Stage %s unexpected "
+                        "failure: %s",
+                        index,
+                        e,
+                    )
+
+                    last_error = str(e)
+
+                    continue
+
+                # ------------------------------------------------
+                # SUCCESS
+                # ------------------------------------------------
+
+                if result:
+
+                    logger.info(
+                        "[OpenRouter] ✓ Stage %s SUCCESS: %s",
+                        index,
+                        target_model,
+                    )
+
+                    return result
+
+                # ------------------------------------------------
+                # ACCOUNT LIMIT
+                # ------------------------------------------------
+
+                if self._account_rate_limit_active():
+
+                    remaining = (
+                        self._account_rate_limit_remaining()
+                    )
+
+                    logger.warning(
+                        "[OpenRouter] Account rate limit "
+                        "reached. Retry in approximately %ss.",
+                        remaining,
+                    )
+
+                    return ""
+
+                # ------------------------------------------------
+                # MODEL FAILURE
+                # ------------------------------------------------
+
+                if self._is_rate_limited(
+                    target_model
+                ):
+
+                    logger.warning(
+                        "[OpenRouter] Stage %s failed "
+                        "due to model rate limit.",
+                        index,
+                    )
+
+                    last_error = (
+                        f"{target_model} rate limited"
+                    )
+
+                    continue
+
+                if self._is_failed_model(
+                    target_model
+                ):
+
+                    logger.warning(
+                        "[OpenRouter] Stage %s model unavailable.",
+                        index,
+                    )
+
+                    last_error = (
+                        f"{target_model} unavailable"
+                    )
+
+                    continue
 
                 last_error = (
-                    f"{target_model} unavailable"
+                    f"{target_model} returned "
+                    "no usable response"
                 )
 
-                continue
+            # ====================================================
+            # NOTHING WORKED
+            # ====================================================
 
-
-            last_error = (
-                f"{target_model} returned "
-                "no usable response"
+            logger.warning(
+                "[OpenRouter] All inference stages failed. Last error: %s",
+                last_error or "unknown",
             )
 
+            if not self._account_rate_limit_active():
+                self._mark_provider_failure()
 
-        # ====================================================
-        # NOTHING WORKED
-        # ====================================================
+            # ====================================================
+            # CRITICAL:
+            #
+            # DO NOT raise RuntimeError here.
+            #
+            # Returning an empty string keeps OpenRouter failure
+            # isolated from JEEV's listening/runtime loop.
+            # ====================================================
 
-        raise RuntimeError(
-            "[OpenRouter] All free inference "
-            "stages failed. "
-            f"Last error: {last_error or 'unknown'}"
-        )
+            return ""
 
+        except Exception as e:
+
+            # ====================================================
+            # ABSOLUTE SAFETY BARRIER
+            # ====================================================
+            #
+            # This is deliberately broad.
+            #
+            # The OpenRouter client is an optional external
+            # service. It must never be capable of terminating
+            # JEEV's core runtime.
+            # ====================================================
+
+            logger.exception(
+                "[OpenRouter] Fallback controller failed "
+                "safely: %s",
+                e,
+            )
+
+            return ""
 
     # ========================================================
     # NORMAL CHAT
@@ -1652,26 +1655,50 @@ class OpenRouterClient:
         temperature: float = DEFAULT_TEMPERATURE,
     ) -> str:
 
-        messages = [
-            {
-                "role": "system",
-                "content": system,
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ]
+        try:
 
+            messages = [
+                {
+                    "role": "system",
+                    "content": system,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ]
 
-        return self._call_with_fallback(
-            pool=[],
-            messages=messages,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+            result = self._call_with_fallback(
+                pool=[],
+                messages=messages,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
 
+            if not result:
+
+                logger.warning(
+                    "[OpenRouter] chat() unavailable; "
+                    "returning empty response."
+                )
+
+                return ""
+
+            return result
+
+        except Exception as e:
+
+            # ------------------------------------------------
+            # CRITICAL LISTENER SAFETY BARRIER
+            # ------------------------------------------------
+
+            logger.exception(
+                "[OpenRouter] chat() failed safely: %s",
+                e,
+            )
+
+            return ""
 
     # ========================================================
     # JSON CHAT
@@ -1701,7 +1728,6 @@ class OpenRouterClient:
             },
         ]
 
-
         try:
 
             raw = self._call_with_fallback(
@@ -1715,41 +1741,82 @@ class OpenRouterClient:
                 },
             )
 
+            if not raw:
+                logger.warning(
+                    "[OpenRouter] Structured JSON "
+                    "inference unavailable."
+                )
 
-        except RuntimeError as first_error:
+                return {}
 
-            # ------------------------------------------------
-            # Never perform the second JSON request when
-            # account-level rate limit is active.
-            # ------------------------------------------------
-
-            if self._account_rate_limit_active():
-
-                raise first_error
-
+        except Exception as first_error:
 
             logger.warning(
                 "[OpenRouter] Structured JSON "
-                "request failed. Retrying "
-                "without response_format: "
-                f"{first_error}"
+                "request failed safely: %s",
+                first_error,
             )
 
+            # ------------------------------------------------
+            # DO NOT make a second request if account-level
+            # rate limiting is active.
+            # ------------------------------------------------
 
-            raw = self._call_with_fallback(
-                pool=[],
-                messages=messages,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=0.1,
-                response_format=None,
+            if self._account_rate_limit_active():
+                return {}
+
+            # ------------------------------------------------
+            # Second attempt without response_format.
+            # ------------------------------------------------
+
+            try:
+
+                logger.info(
+                    "[OpenRouter] Retrying JSON request "
+                    "without response_format."
+                )
+
+                raw = self._call_with_fallback(
+                    pool=[],
+                    messages=messages,
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=0.1,
+                    response_format=None,
+                )
+
+            except Exception as second_error:
+
+                logger.warning(
+                    "[OpenRouter] JSON fallback failed "
+                    "safely: %s",
+                    second_error,
+                )
+
+                return {}
+
+            if not raw:
+                return {}
+
+        # ----------------------------------------------------
+        # Parse safely.
+        # ----------------------------------------------------
+
+        try:
+
+            return self._parse_json_response(
+                raw
             )
 
+        except Exception as e:
 
-        return self._parse_json_response(
-            raw
-        )
+            logger.warning(
+                "[OpenRouter] JSON response could "
+                "not be parsed safely: %s",
+                e,
+            )
 
+            return {}
 
     # ========================================================
     # JSON PARSER
@@ -1763,11 +1830,9 @@ class OpenRouterClient:
         if not raw:
             return {}
 
-
         clean = str(
             raw
         ).strip()
-
 
         # ----------------------------------------------------
         # Remove markdown fences.
@@ -1777,28 +1842,22 @@ class OpenRouterClient:
 
             parts = clean.split("```")
 
-
             if len(parts) >= 2:
 
                 clean = parts[1].strip()
 
-
                 if clean.lower().startswith(
                     "json"
                 ):
-
                     clean = clean[
                         4:
                     ].strip()
 
-
         clean = clean.strip()
-
 
         clean = clean.rstrip(
             "`"
         ).strip()
-
 
         # ----------------------------------------------------
         # Direct JSON.
@@ -1810,22 +1869,16 @@ class OpenRouterClient:
                 clean
             )
 
-
             if isinstance(
                 data,
                 dict,
             ):
-
                 return data
-
 
             return {}
 
-
         except json.JSONDecodeError:
-
             pass
-
 
         # ----------------------------------------------------
         # Find object embedded in text.
@@ -1835,11 +1888,9 @@ class OpenRouterClient:
             "{"
         )
 
-
         end = clean.rfind(
             "}"
         )
-
 
         if (
             start >= 0
@@ -1851,38 +1902,31 @@ class OpenRouterClient:
                 end + 1
             ]
 
-
             try:
 
                 data = json.loads(
                     candidate
                 )
 
-
                 if isinstance(
                     data,
                     dict,
                 ):
-
                     return data
 
-
             except json.JSONDecodeError:
-
                 pass
-
 
         logger.error(
             "[OpenRouter] JSON parse failed. "
-            f"Raw response: {clean[:500]}"
+            "Raw response: %s",
+            clean[:500],
         )
-
 
         raise ValueError(
             "Model returned unparseable JSON. "
             f"Raw output: {clean[:300]}"
         )
-
 
     # ========================================================
     # VISION
@@ -1902,41 +1946,50 @@ class OpenRouterClient:
         max_tokens: int = 1024,
     ) -> str:
 
-        messages = [
-            {
-                "role": "system",
-                "content": system,
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": (
-                                f"data:{mime};base64,"
-                                f"{image_b64}"
-                            )
+        try:
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": system,
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": (
+                                    f"data:{mime};base64,"
+                                    f"{image_b64}"
+                                )
+                            },
                         },
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt,
-                    },
-                ],
-            },
-        ]
+                        {
+                            "type": "text",
+                            "text": prompt,
+                        },
+                    ],
+                },
+            ]
 
+            return self._call_with_fallback(
+                pool=[],
+                messages=messages,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=0.2,
+                vision=True,
+            )
 
-        return self._call_with_fallback(
-            pool=[],
-            messages=messages,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=0.2,
-            vision=True,
-        )
+        except Exception as e:
 
+            logger.exception(
+                "[OpenRouter] vision() failed safely: %s",
+                e,
+            )
+
+            return ""
 
     # ========================================================
     # VISION FROM FILE
@@ -1955,57 +2008,66 @@ class OpenRouterClient:
         max_tokens: int = 1024,
     ) -> str:
 
-        path = Path(
-            image_path
-        )
+        try:
 
-
-        if not path.exists():
-
-            raise FileNotFoundError(
-                f"Image not found: {path}"
+            path = Path(
+                image_path
             )
 
+            if not path.exists():
 
-        mime_map = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".webp": "image/webp",
-            ".gif": "image/gif",
-            ".bmp": "image/bmp",
-        }
-
-
-        mime = mime_map.get(
-            path.suffix.lower(),
-            "image/png",
-        )
-
-
-        with open(
-            path,
-            "rb",
-        ) as f:
-
-            image_b64 = (
-                base64.b64encode(
-                    f.read()
-                ).decode(
-                    "utf-8"
+                logger.error(
+                    "[OpenRouter] Image not found: %s",
+                    path,
                 )
+
+                return ""
+
+            mime_map = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".webp": "image/webp",
+                ".gif": "image/gif",
+                ".bmp": "image/bmp",
+            }
+
+            mime = mime_map.get(
+                path.suffix.lower(),
+                "image/png",
             )
 
+            with open(
+                path,
+                "rb",
+            ) as f:
 
-        return self.vision(
-            prompt=prompt,
-            image_b64=image_b64,
-            mime=mime,
-            system=system,
-            model=model,
-            max_tokens=max_tokens,
-        )
+                image_b64 = (
+                    base64.b64encode(
+                        f.read()
+                    ).decode(
+                        "utf-8"
+                    )
+                )
 
+            return self.vision(
+                prompt=prompt,
+                image_b64=image_b64,
+                mime=mime,
+                system=system,
+                model=model,
+                max_tokens=max_tokens,
+            )
+
+        except Exception as e:
+
+            logger.exception(
+                "[OpenRouter] vision_from_file() "
+                "failed safely: %s",
+                e,
+            )
+
+            return ""
 
     # ========================================================
     # MULTI-TURN
@@ -2019,14 +2081,31 @@ class OpenRouterClient:
         temperature: float = DEFAULT_TEMPERATURE,
     ) -> str:
 
-        return self._call_with_fallback(
-            pool=[],
-            messages=messages,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+        try:
 
+            if self._is_coding_request(messages) and not model:
+                logger.info(
+                    "[OpenRouter] multi_turn(): coding request detected; "
+                    "FREE-ONLY routing is enforced."
+                )
+
+            return self._call_with_fallback(
+                pool=[],
+                messages=messages,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+
+        except Exception as e:
+
+            logger.exception(
+                "[OpenRouter] multi_turn() "
+                "failed safely: %s",
+                e,
+            )
+
+            return ""
 
     # ========================================================
     # MODEL INFORMATION
@@ -2036,55 +2115,95 @@ class OpenRouterClient:
         self,
     ) -> dict:
 
-        discovered = (
-            self._discover_free_models()
-        )
+        try:
 
-
-        vision_models = (
-            self._discover_free_models(
-                vision=True
+            discovered = (
+                self._discover_free_models()
             )
-        )
 
+            vision_models = (
+                self._discover_free_models(
+                    vision=True
+                )
+            )
 
-        return {
-            "primary_text_router":
-                FREE_ROUTER_MODEL,
+            return {
+                "primary_text_router":
+                    FREE_ROUTER_MODEL,
 
-            "text_models": [
-                FREE_ROUTER_MODEL,
-                *discovered,
-            ],
+                "text_models": [
+                    FREE_ROUTER_MODEL,
+                    *discovered,
+                ],
 
-            "vision_models": [
-                FREE_ROUTER_MODEL,
-                *vision_models,
-            ],
+                "vision_models": [
+                    FREE_ROUTER_MODEL,
+                    *vision_models,
+                ],
 
-            "rate_limited":
-                list(
-                    _rate_limited.keys()
-                ),
+                "rate_limited":
+                    list(
+                        _rate_limited.keys()
+                    ),
 
-            "temporarily_failed":
-                list(
-                    _failed_models.keys()
-                ),
+                "temporarily_failed":
+                    list(
+                        _failed_models.keys()
+                    ),
 
-            "global_rate_limit":
-                self._account_rate_limit_active(),
+                "global_rate_limit":
+                    self._account_rate_limit_active(),
 
-            "global_rate_limit_remaining":
-                self._account_rate_limit_remaining(),
+                "global_rate_limit_remaining":
+                    self._account_rate_limit_remaining(),
 
-            "total_text":
-                1 + len(discovered),
+                "total_text":
+                    1 + len(discovered),
 
-            "total_vision":
-                1 + len(vision_models),
-        }
+                "total_vision":
+                    1 + len(vision_models),
+            }
 
+        except Exception as e:
+
+            logger.exception(
+                "[OpenRouter] available_models() "
+                "failed safely: %s",
+                e,
+            )
+
+            return {
+                "primary_text_router":
+                    FREE_ROUTER_MODEL,
+
+                "text_models": [
+                    FREE_ROUTER_MODEL
+                ],
+
+                "vision_models": [
+                    FREE_ROUTER_MODEL
+                ],
+
+                "rate_limited":
+                    list(
+                        _rate_limited.keys()
+                    ),
+
+                "temporarily_failed":
+                    list(
+                        _failed_models.keys()
+                    ),
+
+                "global_rate_limit":
+                    self._account_rate_limit_active(),
+
+                "global_rate_limit_remaining":
+                    self._account_rate_limit_remaining(),
+
+                "total_text": 1,
+
+                "total_vision": 1,
+            }
 
     # ========================================================
     # HEALTH CHECK
@@ -2102,7 +2221,6 @@ class OpenRouterClient:
             "retry_after": 0,
         }
 
-
         # ----------------------------------------------------
         # Don't request if account is already limited.
         # ----------------------------------------------------
@@ -2113,21 +2231,16 @@ class OpenRouterClient:
                 self._account_rate_limit_remaining()
             )
 
-
             result["message"] = (
                 "OpenRouter free inference is "
                 "currently rate-limited."
             )
 
-
             result["rate_limited"] = True
-
 
             result["retry_after"] = remaining
 
-
             return result
-
 
         # ----------------------------------------------------
         # Actual health request.
@@ -2141,7 +2254,6 @@ class OpenRouterClient:
                 temperature=0.0,
             )
 
-
             if reply:
 
                 result["available"] = True
@@ -2150,11 +2262,13 @@ class OpenRouterClient:
 
                 return result
 
-
         except Exception as e:
 
-            result["message"] = str(e)
+            # This is intentionally defensive.
+            #
+            # chat() already catches its own failures.
 
+            result["message"] = str(e)
 
             if self._account_rate_limit_active():
 
@@ -2164,14 +2278,11 @@ class OpenRouterClient:
                     self._account_rate_limit_remaining()
                 )
 
-
             return result
-
 
         result["message"] = (
             "OpenRouter returned no usable response."
         )
-
 
         return result
 
@@ -2180,7 +2291,47 @@ class OpenRouterClient:
 # GLOBAL CLIENT
 # ============================================================
 
-client = OpenRouterClient()
+try:
+
+    client = OpenRouterClient()
+
+except Exception as e:
+
+    # ========================================================
+    # IMPORTANT RELEASE SAFETY
+    # ========================================================
+    #
+    # If OpenRouter configuration is broken, importing this
+    # module should not necessarily destroy the whole JEEV
+    # process.
+    #
+    # However, a client object still needs to exist so callers
+    # can safely invoke the normal methods.
+    # ========================================================
+
+    logger.exception(
+        "[OpenRouter] Client initialization failed: %s",
+        e,
+    )
+
+    client = None
+
+
+# ============================================================
+# PUBLIC CLIENT ACCESSOR
+# ============================================================
+
+def get_client() -> "OpenRouterClient | None":
+    """Return a usable OpenRouter client, creating it lazily when needed."""
+    global client
+    if client is not None:
+        return client
+    try:
+        client = OpenRouterClient()
+        return client
+    except Exception as exc:
+        logger.error("[OpenRouter] Lazy client initialization failed: %s", exc)
+        return None
 
 
 # ============================================================
@@ -2197,7 +2348,6 @@ if __name__ == "__main__":
 
     print("=" * 70)
 
-
     # ========================================================
     # TEST 1 — API KEY
     # ========================================================
@@ -2206,8 +2356,12 @@ if __name__ == "__main__":
         "\n[TEST 1] API key..."
     )
 
-
     try:
+
+        if client is None:
+            raise RuntimeError(
+                "OpenRouter client initialization failed."
+            )
 
         print(
             "  API key loaded : YES"
@@ -2223,13 +2377,11 @@ if __name__ == "__main__":
             "  Status         : PASS ✓"
         )
 
-
     except Exception as e:
 
         print(
             f"  Status         : FAIL ✗ — {e}"
         )
-
 
     # ========================================================
     # TEST 2 — FREE MODEL DISCOVERY
@@ -2239,47 +2391,44 @@ if __name__ == "__main__":
         "\n[TEST 2] Free model discovery..."
     )
 
-
     try:
 
-        info = client.available_models()
+        if client is None:
+            raise RuntimeError(
+                "OpenRouter client unavailable."
+            )
 
+        info = client.available_models()
 
         print(
             "  Primary router : "
             f"{info['primary_text_router']}"
         )
 
-
         print(
             "  Text models    : "
             f"{info['total_text']}"
         )
-
 
         print(
             "  Vision models  : "
             f"{info['total_vision']}"
         )
 
-
         print(
             "  Rate limited   : "
             f"{info['rate_limited'] or 'none'}"
         )
-
 
         print(
             "  Failed models  : "
             f"{info['temporarily_failed'] or 'none'}"
         )
 
-
         print(
             "  Global limit   : "
             f"{info['global_rate_limit']}"
         )
-
 
         if info[
             "global_rate_limit_remaining"
@@ -2290,18 +2439,15 @@ if __name__ == "__main__":
                 f"{info['global_rate_limit_remaining']}s"
             )
 
-
         print(
             "  Status         : PASS ✓"
         )
-
 
     except Exception as e:
 
         print(
             f"  Status         : FAIL ✗ — {e}"
         )
-
 
     # ========================================================
     # TEST 3 — BASIC CHAT
@@ -2311,30 +2457,43 @@ if __name__ == "__main__":
         "\n[TEST 3] Basic chat..."
     )
 
-
     try:
+
+        if client is None:
+            raise RuntimeError(
+                "OpenRouter client unavailable."
+            )
 
         reply = client.chat(
             "Introduce yourself in one short sentence."
         )
 
+        if reply:
 
-        print(
-            f"  Response       : {reply}"
-        )
+            print(
+                f"  Response       : {reply}"
+            )
 
+            print(
+                "  Status         : PASS ✓"
+            )
 
-        print(
-            "  Status         : PASS ✓"
-        )
+        else:
 
+            print(
+                "  Response       : "
+                "No usable response."
+            )
+
+            print(
+                "  Status         : SAFE FALLBACK"
+            )
 
     except Exception as e:
 
         print(
             f"  Status         : FAIL ✗ — {e}"
         )
-
 
     # ========================================================
     # TEST 4 — JSON
@@ -2344,8 +2503,12 @@ if __name__ == "__main__":
         "\n[TEST 4] JSON mode..."
     )
 
-
     try:
+
+        if client is None:
+            raise RuntimeError(
+                "OpenRouter client unavailable."
+            )
 
         data = client.chat_json(
             (
@@ -2356,23 +2519,24 @@ if __name__ == "__main__":
             )
         )
 
-
         print(
             f"  Response       : {data}"
         )
 
-
-        print(
-            "  Status         : PASS ✓"
-        )
-
+        if data:
+            print(
+                "  Status         : PASS ✓"
+            )
+        else:
+            print(
+                "  Status         : SAFE FALLBACK"
+            )
 
     except Exception as e:
 
         print(
             f"  Status         : FAIL ✗ — {e}"
         )
-
 
     # ========================================================
     # TEST 5 — MULTI-TURN
@@ -2382,8 +2546,12 @@ if __name__ == "__main__":
         "\n[TEST 5] Multi-turn conversation..."
     )
 
-
     try:
+
+        if client is None:
+            raise RuntimeError(
+                "OpenRouter client unavailable."
+            )
 
         history = [
             {
@@ -2409,28 +2577,28 @@ if __name__ == "__main__":
             },
         ]
 
-
         reply = client.multi_turn(
             history
         )
-
 
         print(
             f"  Response       : {reply}"
         )
 
-
-        print(
-            "  Status         : PASS ✓"
-        )
-
+        if reply:
+            print(
+                "  Status         : PASS ✓"
+            )
+        else:
+            print(
+                "  Status         : SAFE FALLBACK"
+            )
 
     except Exception as e:
 
         print(
             f"  Status         : FAIL ✗ — {e}"
         )
-
 
     # ========================================================
     # TEST 6 — HEALTH CHECK
@@ -2440,23 +2608,24 @@ if __name__ == "__main__":
         "\n[TEST 6] OpenRouter health check..."
     )
 
-
     try:
 
-        health = client.health_check()
+        if client is None:
+            raise RuntimeError(
+                "OpenRouter client unavailable."
+            )
 
+        health = client.health_check()
 
         print(
             "  Available      : "
             f"{health['available']}"
         )
 
-
         print(
             "  Message        : "
             f"{health['message']}"
         )
-
 
         if health.get(
             "rate_limited",
@@ -2467,12 +2636,10 @@ if __name__ == "__main__":
                 "  Rate limited   : YES"
             )
 
-
             print(
                 "  Retry after    : "
                 f"{health.get('retry_after', 0)}s"
             )
-
 
         if health["available"]:
 
@@ -2483,16 +2650,15 @@ if __name__ == "__main__":
         else:
 
             print(
-                "  Status         : FAIL ✗"
+                "  Status         : "
+                "UNAVAILABLE — JEEV SAFE"
             )
-
 
     except Exception as e:
 
         print(
             f"  Status         : FAIL ✗ — {e}"
         )
-
 
     # ========================================================
     # COMPLETE
@@ -2502,11 +2668,9 @@ if __name__ == "__main__":
         "\n" + "=" * 70
     )
 
-
     print(
         "  JEEV — OpenRouter Client Test Complete"
     )
-
 
     print(
         "=" * 70
