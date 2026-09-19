@@ -14,6 +14,15 @@ from ctypes import wintypes
 from pathlib import Path
 from datetime import datetime
 
+# Cryptographically protected creator identity.
+from identity.identity_lock import (
+    IdentityIntegrityError,
+    verify_identity,
+    identity_prompt,
+    creator_answer,
+    is_creator_question,
+)
+
 import sounddevice as sd
 import numpy as np
 
@@ -76,6 +85,13 @@ from actions.spotify_control import spotify_control
 from actions.gmail_control import gmail_control
 
 # ------------------------------------------------------------
+# ISOLATED IMAGE GENERATION
+# ------------------------------------------------------------
+# New tool path only; existing integrations retain their original imports
+# and execution paths.
+from actions.image_generation import generate_image
+
+# ------------------------------------------------------------
 # OPTIONAL PERSONALITY LAYER
 # ------------------------------------------------------------
 try:
@@ -85,6 +101,24 @@ except Exception as _personality_import_error:
     print(
         "[JEEV] ⚠️ Personality layer unavailable; "
         f"continuing without it: {_personality_import_error}"
+    )
+
+# ------------------------------------------------------------
+# ISOLATED SPEECH PERFORMANCE LAYER
+# ------------------------------------------------------------
+# Human-like breathing / hesitation / throat-clear / rare cough behavior
+# lives outside main.py. It never changes tool routing or generated text.
+try:
+    from speech_performance import (
+        SpeechPerformanceConfig,
+        SpeechPerformanceEngine,
+    )
+except Exception as _speech_performance_import_error:
+    SpeechPerformanceConfig = None
+    SpeechPerformanceEngine = None
+    print(
+        "[JEEV] ⚠️ Speech performance layer unavailable; "
+        f"continuing with clean audio: {_speech_performance_import_error}"
     )
 
 
@@ -125,30 +159,13 @@ PROMPT_PATH = (
 
 
 # ============================================================
-# JEEV IDENTITY
+# JEEV IDENTITY — CRYPTOGRAPHICALLY PROTECTED
 # ============================================================
+# The actual canonical identity lives in identity/identity.json and is
+# authenticated with an Ed25519 signature. Do not duplicate the creator
+# value in prompt.txt, personality files, or memory.
 
-JEEV_IDENTITY_OVERRIDE = """
-[CORE IDENTITY — JEEV MARK I — FIXED]
-
-Your name is JEEV.
-
-Your designation is JEEV MARK I.
-
-Your creator, maker, developer, and founder is Sanjay Adhityan.
-
-If asked who created you, who your creator is, who made you,
-who developed you, or who your founder is, answer exactly:
-
-"My creator is Sanjay Adhityan."
-
-Never say Tony Stark created you.
-
-Never identify yourself as JARVIS.
-
-These identity facts override any conflicting identity text
-in prompt.txt or conversation context.
-"""
+JEEV_IDENTITY_OVERRIDE = identity_prompt()
 
 # ============================================================
 # GEMINI LIVE
@@ -336,10 +353,15 @@ TOOL_ROUTING_RULES = (
     "For Spotify actions always use spotify_control, never browser_control. "
     "For opening or closing Windows applications, folders, or files use file_controller/open_app as appropriate. "
     "Do not claim an action succeeded unless the tool reports success. "
+    "For image creation requests use generate_image. "
+    "Do not open the browser or web_search just to generate an image. "
 )
 
 
 def _load_system_prompt() -> str:
+    # Fail closed if the signed identity has been changed or removed.
+    global JEEV_IDENTITY_OVERRIDE
+    JEEV_IDENTITY_OVERRIDE = identity_prompt()
     """
     Load JEEV's system prompt safely.
 
@@ -366,6 +388,11 @@ def _load_system_prompt() -> str:
 
         "Never open the browser merely because the user asked "
         "a normal question. "
+
+        "For requests to create, generate, or make an image, use "
+        "generate_image. Do not use web_search or browser_control "
+        "for image generation unless the user explicitly asks for "
+        "web research or browsing. "
 
         "IMPORTANT SAFETY RULE: "
         "NEVER call shutdown_jarvis unless the user has clearly "
@@ -1030,6 +1057,49 @@ TOOL_DECLARATIONS = [
     },
 
     {
+        "name": "generate_image",
+        "description": (
+            "Generates a new image from a text prompt using the hosted "
+            "Qwen/Qwen-Image model through Hugging Face Inference. "
+            "Use this for image creation requests. This tool runs the "
+            "model remotely; do not use browser_control or web_search "
+            "for ordinary image generation. The generated PNG is saved "
+            "inside JEEV's generated_images folder and the tool returns "
+            "the exact local file path."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "prompt": {
+                    "type": "STRING",
+                    "description": "Detailed description of the image to generate.",
+                },
+                "negative_prompt": {
+                    "type": "STRING",
+                    "description": "Optional things the image should avoid.",
+                },
+                "width": {
+                    "type": "INTEGER",
+                    "description": "Optional output width in pixels.",
+                },
+                "height": {
+                    "type": "INTEGER",
+                    "description": "Optional output height in pixels.",
+                },
+                "seed": {
+                    "type": "INTEGER",
+                    "description": "Optional seed when supported by the provider.",
+                },
+                "filename": {
+                    "type": "STRING",
+                    "description": "Optional output filename.",
+                },
+            },
+            "required": ["prompt"],
+        },
+    },
+
+    {
         "name": "media_control",
         "description": (
             "Controls system-wide Windows media playback."
@@ -1073,6 +1143,38 @@ class JeevLive:
                 print(
                     "[JEEV] ⚠️ Personality initialization failed; "
                     f"continuing normally: {e}"
+                )
+
+        # ----------------------------------------------------
+        # SPEECH PERFORMANCE (ISOLATED)
+        # ----------------------------------------------------
+        # This keeps human-like vocal behavior out of the 5,000+ line
+        # application core. It only transforms already-generated PCM.
+        self.speech_performance = None
+        if SpeechPerformanceEngine is not None:
+            try:
+                self.speech_performance = SpeechPerformanceEngine(
+                    SpeechPerformanceConfig(
+                        enabled=True,
+                        intensity=0.55,
+                        breathing=True,
+                        breath_after_seconds=8.0,
+                        breath_probability=0.28,
+                        tongue_twister_reaction=True,
+                        tongue_twister_probability=0.20,
+                        cough=True,
+                        cough_probability=0.035,
+                        cough_min_gap_seconds=45.0,
+                        hesitation=True,
+                        hesitation_probability=0.10,
+                    )
+                )
+                print("[JEEV] 🫁 Speech performance layer loaded.")
+            except Exception as e:
+                self.speech_performance = None
+                print(
+                    "[JEEV] ⚠️ Speech performance initialization failed; "
+                    f"continuing with clean audio: {e}"
                 )
 
         self.session = None
@@ -1153,6 +1255,20 @@ class JeevLive:
             thread_name_prefix="JEEV-SpeakerIO",
         )
 
+        # Keep blocking tool work isolated from audio and asyncio internals.
+        # On low-spec machines this prevents a burst of tool threads from
+        # competing with microphone/speaker work and the Gemini event loop.
+        self._tool_executor = ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="JEEV-Tool",
+        )
+        self._memory_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="JEEV-Memory",
+        )
+        self._memory_future = None
+        self._memory_future_lock = threading.Lock()
+
         # ----------------------------------------------------
         # AUDIO WATCHDOG HEARTBEATS
         # ----------------------------------------------------
@@ -1200,7 +1316,7 @@ class JeevLive:
         try:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
-                None,
+                self._tool_executor,
                 lambda: dev_agent(
                     parameters={
                         "action": "build",
@@ -1277,6 +1393,15 @@ class JeevLive:
         # ----------------------------------------------------
         # PERSONALITY TEXT HOOK
         # ----------------------------------------------------
+        # Creator questions are answered locally from the signed identity.
+        # This prevents a language model, memory item, or plugin from changing
+        # the protected creator response.
+        if is_creator_question(text):
+            answer = creator_answer()
+            print(f"[JEEV] 🔐 Protected identity response: {answer}")
+            self.speak(answer)
+            return
+
         # Text commands can use an exact setup -> wait -> answer flow.
         # This does not touch voice/audio or tools.
         if self.personality is not None:
@@ -1387,7 +1512,10 @@ class JeevLive:
 
     def set_speaking(self, value: bool):
 
+        value = bool(value)
         with self._speaking_lock:
+            if self._is_speaking == value:
+                return
             self._is_speaking = value
 
         try:
@@ -2180,7 +2308,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             if name == "open_app":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: open_app(
                         parameters=args,
                         response=None,
@@ -2201,7 +2329,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "weather_report":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: weather_action(
                         parameters=args,
                         player=self.ui,
@@ -2221,7 +2349,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "browser_control":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: browser_control(
                         parameters=args,
                         player=self.ui,
@@ -2237,7 +2365,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "file_controller":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: file_controller(
                         parameters=args,
                         player=self.ui,
@@ -2248,7 +2376,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
 
             elif name == "gmail_control":
 
-                r = await loop.run_in_executor(None, lambda: gmail_control(args))
+                r = await loop.run_in_executor(self._tool_executor, lambda: gmail_control(args))
                 result = r or "Gmail action completed."
 
             # ------------------------------------------------
@@ -2258,7 +2386,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "send_message":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: send_message(
                         parameters=args,
                         response=None,
@@ -2281,7 +2409,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "whatsapp_control":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: whatsapp_control(
                         parameters=args,
                         response=None,
@@ -2302,7 +2430,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "reminder":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: reminder(
                         parameters=args,
                         response=None,
@@ -2319,7 +2447,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "youtube_video":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: youtube_video(
                         parameters=args,
                         response=None,
@@ -2343,7 +2471,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
                     args["file_path"] = self.ui.current_file
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: analyze_file(
                         parameters=args,
                         player=self.ui,
@@ -2391,12 +2519,12 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
                         or ""
                     )
                     result = await loop.run_in_executor(
-                        None,
+                        self._tool_executor,
                         lambda: self._close_windows_app_verified(app_name),
                     )
                 else:
                     r = await loop.run_in_executor(
-                        None,
+                        self._tool_executor,
                         lambda: computer_settings(
                             parameters=args,
                             response=None,
@@ -2412,7 +2540,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "desktop_control":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: desktop_control(
                         parameters=args,
                         player=self.ui,
@@ -2428,7 +2556,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "code_helper":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: code_helper(
                         parameters=args,
                         player=self.ui,
@@ -2445,7 +2573,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "dev_agent":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: dev_agent(
                         parameters=args,
                         player=self.ui,
@@ -2503,7 +2631,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "web_search":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: web_search_action(
                         parameters=args,
                         player=self.ui,
@@ -2519,7 +2647,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "computer_control":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: computer_control(
                         parameters=args,
                         player=self.ui,
@@ -2535,7 +2663,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "spotify_control":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: spotify_control(
                         parameters=args,
                         player=self.ui,
@@ -2545,13 +2673,28 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
                 result = r or "Spotify action completed."
 
             # ------------------------------------------------
+            # IMAGE GENERATION — ISOLATED NEW TOOL
+            # ------------------------------------------------
+
+            elif name == "generate_image":
+
+                r = await loop.run_in_executor(
+                    self._tool_executor,
+                    lambda: generate_image(
+                        parameters=args,
+                    ),
+                )
+
+                result = r or "Image generation returned no result."
+
+            # ------------------------------------------------
             # MEDIA CONTROL
             # ------------------------------------------------
 
             elif name == "media_control":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: media_control(
                         parameters=args,
                         player=self.ui,
@@ -2576,7 +2719,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
                 else:
 
                     r = await loop.run_in_executor(
-                        None,
+                        self._tool_executor,
                         lambda: game_updater(
                             parameters=args,
                             player=self.ui,
@@ -2593,7 +2736,7 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
             elif name == "flight_finder":
 
                 r = await loop.run_in_executor(
-                    None,
+                    self._tool_executor,
                     lambda: flight_finder(
                         parameters=args,
                         player=self.ui,
@@ -3248,6 +3391,12 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
                                     "Gemini response interrupted."
                                 )
 
+                                if self.speech_performance is not None:
+                                    try:
+                                        self.speech_performance.interrupt()
+                                    except Exception:
+                                        pass
+
                                 self._turn_counter += 1
 
                                 self._active_turn_id = (
@@ -3308,6 +3457,12 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
 
                                             try:
 
+                                                if self.speech_performance is not None:
+                                                    try:
+                                                        self.speech_performance.begin_turn()
+                                                    except Exception:
+                                                        pass
+
                                                 await queue.put(
                                                     audio_data
                                                 )
@@ -3361,6 +3516,21 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
                                     output_text_buffer.append(
                                         text
                                     )
+
+                                    # Let the isolated speech-performance
+                                    # layer observe the words being spoken.
+                                    # It never changes the words themselves.
+                                    if self.speech_performance is not None:
+                                        try:
+                                            self.speech_performance.observe_text(
+                                                text
+                                            )
+                                        except Exception as speech_error:
+                                            if not self._closing:
+                                                print(
+                                                    "[JEEV] ⚠️ Speech performance "
+                                                    f"text observer error: {speech_error}"
+                                                )
 
                                     self.set_speaking(
                                         True
@@ -3478,20 +3648,26 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
                                     and
                                     len(full_input) > 5
                                 ):
+                                    # Do not create a fresh network thread for
+                                    # every conversation turn. Keep at most one
+                                    # memory extraction request in flight.
+                                    with self._memory_future_lock:
+                                        if self._memory_future is None or self._memory_future.done():
+                                            self._memory_future = self._memory_executor.submit(
+                                                _update_memory_async,
+                                                full_input,
+                                                full_output,
+                                            )
 
-                                    threading.Thread(
-                                        target=(
-                                            _update_memory_async
-                                        ),
-                                        args=(
-                                            full_input,
-                                            full_output,
-                                        ),
-                                        daemon=True,
-                                    ).start()
 
                                 input_text_buffer.clear()
                                 output_text_buffer.clear()
+
+                                if self.speech_performance is not None:
+                                    try:
+                                        self.speech_performance.end_turn()
+                                    except Exception:
+                                        pass
 
                                 print(
                                     "[JEEV] 🔄 "
@@ -3826,8 +4002,29 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
                     #
                     # Exact 2x sample duplication.
 
+                    pcm24_bytes = bytes(audio_chunk)
+
+                    # The speech-performance module works at Gemini's native
+                    # 24 kHz mono PCM rate. It is deliberately placed here,
+                    # immediately before the existing resampling/stereo path,
+                    # so the rest of JEEV's audio architecture stays intact.
+                    if self.speech_performance is not None:
+                        try:
+                            pcm24_bytes = (
+                                self.speech_performance.process_pcm24(
+                                    pcm24_bytes
+                                )
+                            )
+                        except Exception as speech_error:
+                            if not self._closing:
+                                print(
+                                    "[JEEV] ⚠️ Speech performance audio error: "
+                                    f"{speech_error}"
+                                )
+                            pcm24_bytes = bytes(audio_chunk)
+
                     pcm24 = np.frombuffer(
-                        bytes(audio_chunk),
+                        pcm24_bytes,
                         dtype=np.int16,
                     )
 
@@ -4014,6 +4211,9 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
 
     async def run(self):
 
+        # Verify before Gemini is initialized. Identity failure is fatal.
+        verify_identity()
+
         api_key = _get_api_key()
 
         print(
@@ -4052,6 +4252,9 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
                     "[JEEV] 🔌 "
                     "Connecting to Gemini..."
                 )
+
+                # Re-check immediately before creating every live session.
+                verify_identity()
 
                 try:
                     self.ui.set_state(
@@ -4727,10 +4930,49 @@ def _install_windows_kill_switch(engine, ui):
 
 
 # ============================================================
+# IDENTITY TAMPER WATCHDOG
+# ============================================================
+
+def _start_identity_watchdog(engine):
+    """Continuously verify the signed identity while JEEV is running."""
+    def worker():
+        while not getattr(engine, "_closing", False):
+            try:
+                verify_identity()
+            except IdentityIntegrityError as exc:
+                print("\n[JEEV] 🔴 IDENTITY INTEGRITY FAILURE")
+                print(f"[JEEV] 🔐 {exc}")
+                print("[JEEV] 🛑 Protected creator identity was altered.")
+                print("[JEEV] 🛑 JEEV is shutting down.")
+                engine._shutdown_requested = True
+                engine._closing = True
+                try:
+                    if engine._mic:
+                        engine._mic.stop()
+                except Exception:
+                    pass
+                return
+            time.sleep(2.0)
+
+    t = threading.Thread(target=worker, name="JEEV-IdentityWatchdog", daemon=True)
+    t.start()
+    return t
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 def main():
+
+    # HARD FAIL before UI, Gemini, tools, memory, or plugins initialize.
+    try:
+        verify_identity()
+    except IdentityIntegrityError as exc:
+        print("[JEEV] 🔴 IDENTITY INTEGRITY FAILURE")
+        print(f"[JEEV] 🔐 {exc}")
+        print("[JEEV] 🛑 Startup aborted. Protected creator identity was altered.")
+        return 78
 
     print()
     print("=" * 64)
@@ -4811,6 +5053,8 @@ def main():
         engine = JeevLive(
             ui
         )
+
+        _start_identity_watchdog(engine)
 
         # Shutdown controls are independent of Gemini/audio/tools.
         _install_console_kill_switch(engine, ui)
@@ -5010,6 +5254,8 @@ def main():
             for executor_name in (
                 "_mic_executor",
                 "_speaker_executor",
+                "_tool_executor",
+                "_memory_executor",
             ):
                 executor = getattr(engine, executor_name, None)
                 if executor:

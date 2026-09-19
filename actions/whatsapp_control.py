@@ -1840,11 +1840,22 @@ def _select_pending_contact_keyboard(index):
         f"for '{query}'."
     )
 
+def _select_pending_contact_mouse(index):
+    """
+    Backward-compatible alias.
+
+    Older JEEV routing code may still refer to the previous mouse-selection
+    helper name. Contact selection is intentionally keyboard-based now:
+    Robocorp sends Down/Enter after the mouse is used only for the Search box.
+    """
+    return _select_pending_contact_keyboard(index)
+
+
 def _select_pending_contact(index):
     """
     Compatibility wrapper.
 
-    Pending contact selection now uses Robocorp keyboard navigation,
+    Pending contact selection uses Robocorp keyboard navigation,
     matching the Spotify result-selection pattern.
     """
     return _select_pending_contact_keyboard(index)
@@ -1899,7 +1910,7 @@ def _open_chat(receiver, contact_index=None):
         parsed is not None
         and _pending_candidates_for()
     ):
-        return _select_pending_contact_mouse(
+        return _select_pending_contact_keyboard(
             parsed
         )
 

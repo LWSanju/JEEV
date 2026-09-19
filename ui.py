@@ -32,8 +32,9 @@ from PyQt6.QtCore import (
     QEasingCurve,
     QParallelAnimationGroup,
     QAbstractAnimation,
+    QUrl,
 )
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap, QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -98,7 +99,7 @@ class AgentAudioVisualizerBar(QFrame):
         self._phase = 0.0
 
         self._timer = QTimer(self)
-        self._timer.setInterval(20)
+        self._timer.setInterval(33)
         self._timer.timeout.connect(self._animate_bars)
 
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -124,7 +125,8 @@ class AgentAudioVisualizerBar(QFrame):
             self._timer.stop()
             return
         self._phase = (self._phase + 0.23) % 10000
-        self.update()
+        # The parent draws the visualizer. One parent repaint at ~30 FPS is
+        # enough for a smooth HUD without consuming the CPU with 50 FPS paints.
         parent = self.parent()
         if parent is not None:
             parent.update()
@@ -272,43 +274,127 @@ class MessageBubble(QFrame):
         body.setMaximumWidth(470)
         layout.addWidget(body)
 
-        self._opacity = QGraphicsOpacityEffect(self)
-        self._opacity.setOpacity(0.0)
-        self.setGraphicsEffect(self._opacity)
-
-        self._fade = None
+        # Keep chat bubbles lightweight. A single position animation is much
+        # cheaper than a QGraphicsOpacityEffect per message, especially on an
+        # 8 GB / integrated-graphics machine.
         self._slide = None
         self._anim_group = None
 
     def animate_in(self, delay: int = 0):
         def start():
-            self._opacity.setOpacity(0.0)
-            self._fade = QPropertyAnimation(self._opacity, b"opacity", self)
-            self._fade.setDuration(230)
-            self._fade.setStartValue(0.0)
-            self._fade.setEndValue(1.0)
-            self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
-
             start_pos = self.pos()
             end_pos = QPoint(start_pos.x(), start_pos.y())
-            self.move(start_pos.x(), start_pos.y() + 8)
+            self.move(start_pos.x(), start_pos.y() + 7)
 
             self._slide = QPropertyAnimation(self, b"pos", self)
-            self._slide.setDuration(270)
-            self._slide.setStartValue(QPoint(start_pos.x(), start_pos.y() + 8))
+            self._slide.setDuration(180)
+            self._slide.setStartValue(QPoint(start_pos.x(), start_pos.y() + 7))
             self._slide.setEndValue(end_pos)
             self._slide.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-            group = QParallelAnimationGroup(self)
-            group.addAnimation(self._fade)
-            group.addAnimation(self._slide)
-            self._anim_group = group
-            group.start(QAbstractAnimation.DeletionPolicy.KeepWhenStopped)
+            self._anim_group = self._slide
+            self._slide.start(QAbstractAnimation.DeletionPolicy.KeepWhenStopped)
 
         if delay:
             QTimer.singleShot(delay, start)
         else:
             start()
+
+
+class GeneratedImageCard(QFrame):
+    """Compact generated-image card shown inside the expanded Dynamic Island."""
+
+    def __init__(self, image_path: str, caption: str = "", parent=None):
+        super().__init__(parent)
+        self.image_path = str(image_path)
+        self.setObjectName("generatedImageCard")
+        self.setStyleSheet("""
+            QFrame#generatedImageCard {
+                background: #0D1016;
+                border: 1px solid #252B37;
+                border-radius: 18px;
+            }
+            QLabel#generatedImageTitle {
+                color: #78A7FF;
+                background: transparent;
+                font-family: "Segoe UI";
+                font-size: 8pt;
+                font-weight: 700;
+            }
+            QLabel#generatedImageCaption {
+                color: #AEB4C0;
+                background: transparent;
+                font-family: "Segoe UI";
+                font-size: 8pt;
+            }
+            QLabel#generatedImage {
+                background: #07080B;
+                border: 1px solid #1E232D;
+                border-radius: 12px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(7)
+
+        title = QLabel("JEEV • GENERATED IMAGE")
+        title.setObjectName("generatedImageTitle")
+        layout.addWidget(title)
+
+        self.image = QLabel()
+        self.image.setObjectName("generatedImage")
+        self.image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image.setMinimumSize(260, 150)
+        self.image.setMaximumHeight(300)
+        self.image.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.image.setToolTip("Click to open the full-size image")
+        self.image.mousePressEvent = self._open_image
+        layout.addWidget(self.image)
+
+        if caption:
+            cap = QLabel(str(caption))
+            cap.setObjectName("generatedImageCaption")
+            cap.setWordWrap(True)
+            layout.addWidget(cap)
+
+        self._pixmap = QPixmap()
+        self._load_image()
+
+    def _load_image(self):
+        pixmap = QPixmap(self.image_path)
+        if pixmap.isNull():
+            self.image.setText("Unable to load generated image.")
+            return
+        self._pixmap = pixmap
+        self._fit_image()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_image()
+
+    def _fit_image(self):
+        if self._pixmap.isNull():
+            return
+        target = self.image.size()
+        if target.width() < 10 or target.height() < 10:
+            return
+        scaled = self._pixmap.scaled(
+            target,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        self.image.setPixmap(scaled)
+
+    def _open_image(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            try:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(self.image_path))
+            except Exception:
+                pass
+            event.accept()
+        else:
+            event.ignore()
+
 
 
 class JarvisUI(QFrame):
@@ -323,6 +409,7 @@ class JarvisUI(QFrame):
     file_signal = pyqtSignal(str)
     mute_signal = pyqtSignal(bool)
     plugin_status_signal = pyqtSignal(str)
+    generated_image_signal = pyqtSignal(str, str)
 
     def __init__(self, face_path: str | None = None, size=None):
         self._app = QApplication.instance() or QApplication(sys.argv)
@@ -340,6 +427,8 @@ class JarvisUI(QFrame):
         self._pressed = False
         self._hovered = False
         self.on_text_command = None
+        self._generated_image_paths = set()
+        self._image_cards = []
 
         self._root_bg = None
         self.root = self._RootShim(self._app)
@@ -507,6 +596,18 @@ class JarvisUI(QFrame):
 
         self._scroll.setWidget(self._chat_view)
         panel_layout.addWidget(self._scroll, 1)
+
+        # Generated-image display. The watcher is intentionally isolated from
+        # the backend so image generation can keep working without changes to
+        # Gmail, WhatsApp, Spotify, browser, coding-agent, or other tools.
+        self.generated_image_signal.connect(self._show_generated_image)
+        self._image_watch_dir = Path(__file__).resolve().parent / "generated_images"
+        self._image_watch_dir.mkdir(parents=True, exist_ok=True)
+        self._remember_existing_generated_images()
+        self._image_watch_timer = QTimer(self)
+        self._image_watch_timer.setInterval(1500)
+        self._image_watch_timer.timeout.connect(self._poll_generated_images)
+        self._image_watch_timer.start()
 
         # Cleaner input dock with a real attachment button.
         input_row = QHBoxLayout()
@@ -1033,19 +1134,30 @@ class JarvisUI(QFrame):
         self.update()
 
     def set_state(self, state: str):
-        self.state_signal.emit(str(state).upper())
+        normalized = str(state).upper().strip() or "IDLE"
+        # Audio streaming can report the same state many times per second.
+        # Do not enqueue duplicate Qt signals/repaints.
+        if normalized == self._state:
+            return
+        self.state_signal.emit(normalized)
 
     def _apply_state(self, state: str):
-        self._state = str(state).upper().strip() or "IDLE"
+        normalized = str(state).upper().strip() or "IDLE"
+        if normalized == self._state:
+            return
+        self._state = normalized
         self._visualizer.set_state(self._state.lower())
         self._sync_visualizer_geometry()
         self.update()
 
     def set_speaking_level(self, level: float):
         try:
-            self._level = clamp(float(level), 0.0, 1.0)
+            value = clamp(float(level), 0.0, 1.0)
         except Exception:
-            self._level = 0.0
+            value = 0.0
+        if abs(value - self._level) < 0.015:
+            return
+        self._level = value
         self._visualizer.set_level(self._level)
         self.update()
 
@@ -1097,6 +1209,79 @@ class JarvisUI(QFrame):
             self._add_bubble("jeev", text)
 
         self.update()
+
+
+    def _remember_existing_generated_images(self):
+        try:
+            for path in self._image_watch_dir.iterdir():
+                if path.is_file() and path.suffix.lower() in {
+                    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"
+                }:
+                    self._generated_image_paths.add(str(path.resolve()))
+        except Exception:
+            pass
+
+    def _poll_generated_images(self):
+        """Pick up newly created images without touching the backend thread."""
+        try:
+            files = [
+                p for p in self._image_watch_dir.iterdir()
+                if p.is_file() and p.suffix.lower() in {
+                    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"
+                }
+            ]
+            files.sort(key=lambda p: p.stat().st_mtime)
+            for path in files:
+                resolved = str(path.resolve())
+                if resolved in self._generated_image_paths:
+                    continue
+                # Ignore files that are still being written.
+                try:
+                    if path.stat().st_size < 1024:
+                        continue
+                except OSError:
+                    continue
+                self._generated_image_paths.add(resolved)
+                self.generated_image_signal.emit(
+                    resolved,
+                    f"Saved to generated_images\\{path.name}",
+                )
+        except Exception:
+            pass
+
+    def show_generated_image(self, image_path: str, caption: str = ""):
+        """Public, thread-safe API for main.py or any image tool to use."""
+        self.generated_image_signal.emit(str(image_path), str(caption or ""))
+
+    def _show_generated_image(self, image_path: str, caption: str = ""):
+        path = Path(str(image_path))
+        if not path.exists() or not path.is_file():
+            return
+        if not self._expanded:
+            self.expand_chat()
+
+        # Avoid duplicate cards if main.py also explicitly calls this API.
+        resolved = str(path.resolve())
+        self._generated_image_paths.add(resolved)
+
+        card = GeneratedImageCard(resolved, caption, self._chat_view)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(card)
+        row.addStretch(1)
+
+        index = max(0, self._chat_layout.count() - 1)
+        self._chat_layout.insertLayout(index, row)
+        self._image_cards.append(card)
+
+        # Do not attach a QGraphicsOpacityEffect to every generated image.
+        # The card is intentionally static so image arrival never stutters
+        # the assistant's live HUD.
+        card.show()
+        card.adjustSize()
+        QTimer.singleShot(80, self._scroll_to_bottom)
+
 
     def _add_bubble(self, role: str, text: str):
         bubble = MessageBubble(role, str(text), self._chat_view)
