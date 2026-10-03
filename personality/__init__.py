@@ -1,18 +1,10 @@
+"""JEEV MARK I personality package."""
 
-"""
-JEEV MARK I - Personality Package
-
-Personality is isolated from JEEV's tools and hardware systems.
-"""
-
-from .sarcasm_engine import (
-    SarcasmEngine,
-    PersonalityDecision,
-    JokeSession,
-)
-
+from .sarcasm_engine import SarcasmEngine, PersonalityDecision, JokeSession
 from .conversation_style import ConversationStyle
 from .humor_bank import HumorBank
+from .personality_core import JeevPersonalityCore
+from .research_policy import ResearchPolicy
 
 __all__ = [
     "SarcasmEngine",
@@ -20,5 +12,6 @@ __all__ = [
     "JokeSession",
     "ConversationStyle",
     "HumorBank",
+    "JeevPersonalityCore",
+    "ResearchPolicy",
 ]
-
