@@ -95,7 +95,7 @@ from actions.image_generation import generate_image
 # OPTIONAL PERSONALITY LAYER
 # ------------------------------------------------------------
 try:
-    from personality.sarcasm_engine import SarcasmEngine
+    from personality.sarcasm_engine import SarcasmEngine\n    from personality.personality_core import JeevPersonalityCore\n    from personality.research_policy import ResearchPolicy
 except Exception as _personality_import_error:
     SarcasmEngine = None
     print(
@@ -524,9 +524,9 @@ TOOL_DECLARATIONS = [
     {
         "name": "web_search",
         "description": (
-            "Searches the web for current information. Use for news, "
-            "current events, places/location information, search, "
-            "lookup, browsing, or research."
+            "Performs quiet background web research without opening a visible browser. Use for "
+            "current information, research, verification, "
+            "lookup and freshness checks. Do NOT use this for visible browser interaction."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -741,8 +741,8 @@ TOOL_DECLARATIONS = [
     {
         "name": "browser_control",
         "description": (
-            "Controls the web browser including opening websites, searching, "
-            "clicking, typing, scrolling and forms. Use this for Gmail "
+            "Controls the visible web browser including opening websites and interacting with pages. "
+            "Use ONLY when the user explicitly asks to use/search/browse in the browser, or requests a browser interaction. "
             "website actions such as opening Gmail or the inbox."
         ),
         "parameters": {
@@ -1924,7 +1924,7 @@ ROAST PROTOCOL:
 MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, browser, files, applications, or any other tool action happened unless the actual tool result says it succeeded. Personality must never change tool arguments or interfere with tool execution.
 """
 
-        sys_prompt += personality_rule
+        if self.personality_core is not None:\n            sys_prompt += "\\n\\n" + self.personality_core.system_instruction()\n\n        if self.research_policy is not None:\n            sys_prompt += "\\n\\n" + self.research_policy.instruction()\n\n        sys_prompt += personality_rule
 
         now = datetime.now()
 
