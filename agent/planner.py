@@ -24,7 +24,7 @@ ABSOLUTE RULES:
 - NEVER write Python scripts.
 - NEVER reference previous step results in parameters.
 - Every step must be independently executable.
-- Use web_search for information retrieval, research, or current data.
+- Use web_search only for quiet background research, freshness checks, or verification. It must not open a visible browser.
 - Use file_controller to save or manipulate files.
 - Use cmd_control to open files or run system commands.
 - Maximum 5 steps.
