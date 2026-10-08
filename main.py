@@ -53,31 +53,22 @@ from actions.whatsapp_control import whatsapp_control
 from actions.reminder import reminder
 from actions.computer_settings import computer_settings
 from actions.screen_processor import screen_process
+from location_service import get_user_location, get_short_location
+from news_service import get_relevant_news
+from coding_assistant import open_coding_assistant
 from actions.youtube_video import youtube_video
 from actions.desktop import desktop_control
 from actions.browser_control import browser_control
 from actions.file_controller import file_controller
-from actions.code_helper import code_helper
-from actions.dev_agent import dev_agent
 
-# Coding-agent compatibility bridge.
-# The existing OpenRouter client is kept untouched; this only supplies the
-# accessor expected by core.coding.coding_agent when older coding-agent code
-# is present. All normal JEEV tools continue using their original paths.
-try:
-    import core.coding.coding_agent as _jeev_coding_module
-    import or_client as _jeev_or_client
+# ------------------------------------------------------------
+# LIGHTWEIGHT SELF-AWARENESS
+# ------------------------------------------------------------
+# Keeps JEEV grounded in his own identity, current state, recent
+# actions, and previous responses. This is state/context, not another
+# AI model and does not replace Gemini's reasoning.
+from self_awareness import SelfAwareness
 
-    if getattr(_jeev_coding_module, "get_client", None) is None:
-        def _jeev_coding_get_client():
-            return getattr(_jeev_or_client, "client", None)
-
-        _jeev_coding_module.get_client = _jeev_coding_get_client
-except Exception as _coding_compat_error:
-    print(
-        "[JEEV] ⚠️ Coding-agent compatibility bridge unavailable; "
-        f"normal JEEV tools remain unaffected: {_coding_compat_error}"
-    )
 from actions.web_search import web_search as web_search_action
 from actions.computer_control import computer_control
 from actions.media_control import media_control
@@ -300,7 +291,7 @@ def _get_api_key() -> str:
 # SURGICAL CODING ROUTING
 # ============================================================
 # Only requests that clearly ask JEEV to modify/test project code are
-# dispatched directly to dev_agent. All other requests keep the original
+# dispatched to coding_assistant.py. All other requests keep the original
 # Gemini Live tool-routing path unchanged.
 _CODING_IMPLEMENTATION_RE = re.compile(
     r"\b(?:create|make|build|implement|write|edit|modify|change|update|"
@@ -352,7 +343,7 @@ TOOL_ROUTING_RULES = (
     "For WhatsApp actions always use whatsapp_control, never browser_control. "
     "For Spotify actions always use spotify_control, never browser_control. "
     "For opening or closing Windows applications, folders, or files use file_controller/open_app as appropriate. "
-    "Do not claim an action succeeded unless the tool reports success. "
+    "Do not claim an action succeeded unless the tool reports success. ""Use location_info for approximate current location requests and news_report for fresh news. "
     "For image creation requests use generate_image. "
     "Do not open the browser or web_search just to generate an image. "
 )
@@ -714,6 +705,40 @@ TOOL_DECLARATIONS = [
     },
 
     {
+        "name": "location_info",
+        "description": (
+            "Returns JEEV's approximate network-based current location. "
+            "Never treat it as an exact street address."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "format": {
+                    "type": "STRING",
+                    "description": "short or detailed",
+                },
+            },
+        },
+    },
+
+    {
+        "name": "news_report",
+        "description": (
+            "Gets fresh news using Google News RSS. Use for current news, "
+            "local news, or a specific news topic. No news API key is required."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {"type": "STRING"},
+                "days": {"type": "INTEGER"},
+                "limit": {"type": "INTEGER"},
+                "location": {"type": "STRING"},
+            },
+        },
+    },
+
+    {
         "name": "computer_settings",
         "description": (
             "Controls Windows settings and actions including "
@@ -820,45 +845,6 @@ TOOL_DECLARATIONS = [
                 "task": {"type": "STRING"},
             },
             "required": ["action"],
-        },
-    },
-
-    {
-        "name": "code_helper",
-        "description": (
-            "Writes, edits, explains, runs or builds code."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action": {"type": "STRING"},
-                "description": {"type": "STRING"},
-                "language": {"type": "STRING"},
-                "output_path": {"type": "STRING"},
-                "file_path": {"type": "STRING"},
-                "code": {"type": "STRING"},
-                "args": {"type": "STRING"},
-                "timeout": {"type": "INTEGER"},
-            },
-            "required": ["action"],
-        },
-    },
-
-    {
-        "name": "dev_agent",
-        "description": (
-            "Builds complete multi-file projects from scratch, "
-            "installs dependencies, runs projects and fixes errors."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "description": {"type": "STRING"},
-                "language": {"type": "STRING"},
-                "project_name": {"type": "STRING"},
-                "timeout": {"type": "INTEGER"},
-            },
-            "required": ["description"],
         },
     },
 
@@ -1227,6 +1213,20 @@ class JeevLive:
         self._last_user_text = ""
         self._text_lock = threading.Lock()
 
+
+        # ----------------------------------------------------
+        # SELF-AWARENESS STATE
+        # ----------------------------------------------------
+        # This gives Gemini grounded knowledge of JEEV himself:
+        # identity, current state, recent actions, failures, and
+        # recent conversation. It is deliberately small and local.
+        self.self_awareness = SelfAwareness(
+            name="JEEV",
+            role="personal AI assistant",
+            max_events=18,
+        )
+        self.self_awareness.set_state("initializing")
+
         # ----------------------------------------------------
         # CONFIRMATION / ACTION STATE
         # ----------------------------------------------------
@@ -1297,13 +1297,8 @@ class JeevLive:
     # TEXT COMMAND
     # ========================================================
 
-    async def _run_coding_agent_direct(self, text: str):
-        """Run dev_agent directly for a clearly identified coding request.
-
-        This path is intentionally isolated from _execute_tool(). It does not
-        modify Gmail, Spotify, WhatsApp, browser, desktop, media, or any other
-        existing tool routing.
-        """
+    async def _run_coding_assistant(self, text: str):
+        """Open ChatGPT for coding work instead of running a local coding agent."""
         if self._closing or self._shutdown_requested:
             return
 
@@ -1312,54 +1307,32 @@ class JeevLive:
         except Exception:
             pass
 
-        print(f"[JEEV] 🧑‍💻 Coding request: {text}")
+        print(f"[JEEV] 🧑‍💻 Coding request detected; opening ChatGPT: {text}")
+
         try:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 self._tool_executor,
-                lambda: dev_agent(
-                    parameters={
-                        "action": "build",
-                        "request": text,
-                    },
-                    player=self.ui,
-                    speak=self.speak,
-                ),
+                lambda: open_coding_assistant(text),
             )
 
-            print(f"[JEEV] 🧑‍💻 Coding result: {result}")
+            message = str(result or "ChatGPT opened for the coding task.")
             try:
-                self.ui.write_log(f"CODE RESULT: {result}")
+                self.ui.write_log(f"CODE ROUTE: {message}")
             except Exception:
                 pass
 
-            if isinstance(result, dict):
-                if result.get("ok") is False:
-                    message = (
-                        "Coding task failed: "
-                        f"{result.get('error', 'unknown error')}."
-                    )
-                else:
-                    message = (
-                        result.get("summary")
-                        or result.get("message")
-                        or "Coding task completed."
-                    )
-            else:
-                message = str(result or "Coding task completed.")
-
-            # Let Gemini speak the concise result using the normal session.
             self.speak(message)
 
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f"[JEEV] ❌ Direct coding dispatch failed: {exc}")
+            print(f"[JEEV] ❌ ChatGPT coding dispatch failed: {exc}")
             try:
-                self.ui.write_log(f"CODE ERROR: {exc}")
+                self.ui.write_log(f"CODE ROUTE ERROR: {exc}")
             except Exception:
                 pass
-            self.speak(f"Coding task failed: {exc}")
+            self.speak(f"I couldn't open ChatGPT for the coding task: {exc}")
         finally:
             try:
                 if not self._shutdown_requested and not self._closing:
@@ -1428,6 +1401,11 @@ class JeevLive:
             f"[JEEV] 📝 Sending text: {text}"
         )
 
+        try:
+            self.self_awareness.set_state("thinking")
+        except Exception:
+            pass
+
         with self._text_lock:
             self._last_user_text = text
 
@@ -1435,9 +1413,9 @@ class JeevLive:
         # selection. Gmail/Spotify/WhatsApp/etc. still follow the original
         # Gemini Live tool path below.
         if _is_coding_request(text):
-            print("[JEEV] 🧑‍💻 Coding intent detected; using dev_agent.")
+            print("[JEEV] 🧑‍💻 Coding intent detected; opening ChatGPT.")
             future = asyncio.run_coroutine_threadsafe(
-                self._run_coding_agent_direct(text),
+                self._run_coding_assistant(text),
                 self._loop,
             )
             future.add_done_callback(self._consume_future_exception)
@@ -1450,9 +1428,23 @@ class JeevLive:
                 if self.session is None:
                     return
 
-                await self.session.send_realtime_input(
-                    text=text
-                )
+                session = self.session
+                if session is None:
+                    print("[JEEV] ⚠️ Gemini session disappeared before text could be sent.")
+                    return
+
+                print("[JEEV] 🔄 Ending active realtime input before text command...")
+                try:
+                    await session.send_realtime_input(audio_stream_end=True)
+                    print("[JEEV] ✅ Realtime input turn closed.")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as end_error:
+                    print("[JEEV] ⚠️ Could not explicitly end realtime input: " f"{end_error}")
+
+                print("[JEEV] 📤 Sending text to Gemini: " f"{text}")
+                await session.send_realtime_input(text=text)
+                print("[JEEV] ✅ Text accepted by Gemini Live.")
 
             except asyncio.CancelledError:
                 raise
@@ -1525,12 +1517,20 @@ class JeevLive:
                 self.ui.set_state(
                     "SPEAKING"
                 )
+                try:
+                    self.self_awareness.set_state("speaking")
+                except Exception:
+                    pass
 
             elif not self.ui.muted:
 
                 self.ui.set_state(
                     "LISTENING"
                 )
+                try:
+                    self.self_awareness.set_state("listening")
+                except Exception:
+                    pass
 
         except Exception:
             pass
@@ -1880,6 +1880,17 @@ class JeevLive:
 
         sys_prompt = _load_system_prompt()
 
+        # ----------------------------------------------------
+        # SELF-AWARENESS CONTEXT
+        # ----------------------------------------------------
+        # Gemini gets a compact, continuously refreshed description of
+        # JEEV's own state. This lets phrases such as "you", "your last
+        # answer", "what did you just do?", and "you opened the wrong app"
+        # resolve against JEEV rather than an unknown third person.
+        self_context = self.self_awareness.prompt_context()
+
+        sys_prompt += "\n\n" + self_context
+
         language_rule = (
             "\n\n[LANGUAGE & VOICE RULE — STRICT]\n"
             "JEEV understands and speaks English, Tamil, and Tanglish. "
@@ -1952,16 +1963,15 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
                 "AUDIO"
             ],
 
+            # google-genai 2.13+ rejects the old language_codes field
+            # inside AudioTranscriptionConfig. Gemini Live now uses the
+            # transcription configuration without that obsolete field.
             output_audio_transcription=(
-                types.AudioTranscriptionConfig(
-                    language_codes=["en-US", "ta-IN"],
-                )
+                types.AudioTranscriptionConfig()
             ),
 
             input_audio_transcription=(
-                types.AudioTranscriptionConfig(
-                    language_codes=["en-US", "ta-IN"],
-                )
+                types.AudioTranscriptionConfig()
             ),
 
             realtime_input_config=types.RealtimeInputConfig(
@@ -2086,6 +2096,11 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
         print(
             f"[JEEV] 🔧 {name} {args}"
         )
+
+        try:
+            self.self_awareness.set_state("executing_action")
+        except Exception:
+            pass
 
         # ----------------------------------------------------
         # CONSEQUENTIAL ACTION GATE
@@ -2487,21 +2502,59 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
 
             elif name == "screen_process":
 
-                threading.Thread(
-                    target=screen_process,
-                    kwargs={
-                        "parameters": args,
-                        "response": None,
-                        "player": self.ui,
-                        "session_memory": None,
-                    },
-                    daemon=True,
-                ).start()
-
-                result = (
-                    "Vision module activated. "
-                    "Stay completely silent."
+                # The screen service must finish the capture before we report
+                # success. The old background-thread route could speak before
+                # the PNG existed.
+                result = await loop.run_in_executor(
+                    self._tool_executor,
+                    lambda: screen_process(
+                        parameters=args,
+                        response=None,
+                        player=self.ui,
+                        session_memory=None,
+                    ),
                 )
+                result = result or "Screen capture returned no result."
+
+            # ------------------------------------------------
+            # APPROXIMATE LOCATION
+            # ------------------------------------------------
+
+            elif name == "location_info":
+
+                location_format = str(
+                    args.get("format", "detailed")
+                ).strip().lower()
+
+                if location_format == "short":
+                    result = await loop.run_in_executor(
+                        self._tool_executor,
+                        get_short_location,
+                    )
+                    result = result or "Approximate location is unavailable."
+                else:
+                    result = await loop.run_in_executor(
+                        self._tool_executor,
+                        get_user_location,
+                    )
+                    result = result or "Approximate location is unavailable."
+
+            # ------------------------------------------------
+            # FRESH NEWS
+            # ------------------------------------------------
+
+            elif name == "news_report":
+
+                result = await loop.run_in_executor(
+                    self._tool_executor,
+                    lambda: get_relevant_news(
+                        query=str(args.get("query", "") or ""),
+                        location=str(args.get("location", "") or ""),
+                        days=args.get("days", 3),
+                        limit=args.get("limit", 8),
+                    ),
+                )
+                result = result or "Fresh news returned no result."
 
             # ------------------------------------------------
             # COMPUTER SETTINGS
@@ -2544,40 +2597,6 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
                     lambda: desktop_control(
                         parameters=args,
                         player=self.ui,
-                    ),
-                )
-
-                result = r or "Done."
-
-            # ------------------------------------------------
-            # CODE HELPER
-            # ------------------------------------------------
-
-            elif name == "code_helper":
-
-                r = await loop.run_in_executor(
-                    self._tool_executor,
-                    lambda: code_helper(
-                        parameters=args,
-                        player=self.ui,
-                        speak=self.speak,
-                    ),
-                )
-
-                result = r or "Done."
-
-            # ------------------------------------------------
-            # DEV AGENT
-            # ------------------------------------------------
-
-            elif name == "dev_agent":
-
-                r = await loop.run_in_executor(
-                    self._tool_executor,
-                    lambda: dev_agent(
-                        parameters=args,
-                        player=self.ui,
-                        speak=self.speak,
                     ),
                 )
 
@@ -2783,11 +2802,33 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
         except Exception:
             pass
 
+        try:
+            if not self._is_speaking and not self._closing:
+                self.self_awareness.set_state("listening")
+        except Exception:
+            pass
+
         print(
             f"[JEEV] 📤 "
             f"{name} → "
             f"{str(result)[:120]}"
         )
+
+        # Ground future references such as "what did you do?", "why did
+        # you do that?", and "you opened the wrong thing" in the real tool
+        # execution result.
+        try:
+            self.self_awareness.record_action(
+                tool_name=name,
+                arguments=args,
+                result=result,
+            )
+        except Exception as awareness_error:
+            if not self._closing:
+                print(
+                    "[JEEV] ⚠️ Self-awareness action record failed: "
+                    f"{awareness_error}"
+                )
 
         return types.FunctionResponse(
             id=fc.id,
@@ -3622,6 +3663,20 @@ MOST IMPORTANT: tools are authoritative. Never claim Spotify, WhatsApp, Gmail, b
                                         self._last_user_text = (
                                             full_input
                                         )
+
+                                    # Ground self-reference in the actual
+                                    # conversation turn, not a guessed memory.
+                                    try:
+                                        self.self_awareness.record_user_turn(
+                                            full_input,
+                                            full_output,
+                                        )
+                                    except Exception as awareness_error:
+                                        if not self._closing:
+                                            print(
+                                                "[JEEV] ⚠️ Self-awareness "
+                                                f"turn record failed: {awareness_error}"
+                                            )
 
                                     try:
 
